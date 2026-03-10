@@ -1,21 +1,31 @@
 """Google Sheets operations for MAPS Cafe Bot.
 
 Handles menu reading and order management via Google Sheets API.
+Uses OrdersCache for batched writes to prevent rate limiting.
 """
 
+import asyncio
 import time
 from datetime import datetime
 from functools import wraps
 from threading import Lock
-from uuid import uuid4
 
 import gspread
 from google.oauth2.service_account import Credentials
 
 from logger import setup_logger
+from orders_cache import OrdersCache
 from private.constants import SPREADSHEET_ID
 
 logger = setup_logger(__name__)
+
+# Global orders cache instance (5s sync for faster persistence under high load)
+orders_cache = OrdersCache(sync_interval=10.0)
+
+# Cafe state management (in-memory with persistence to sheet)
+# State: {"brothers": True/False, "sisters": True/False}
+_cafe_state: dict[str, bool] = {"brothers": False, "sisters": False}
+_cafe_state_lock = Lock()
 
 # Google Sheets API scopes
 SCOPES = [
@@ -109,6 +119,300 @@ def get_gspread_client() -> gspread.Client:
 
 
 # ============================================================================
+# ADMIN OPERATIONS
+# ============================================================================
+
+
+@retry_on_quota_error()
+def is_admin(telegram_id: int) -> bool:
+    """Check if a user is an admin.
+
+    Args:
+        telegram_id: The Telegram user ID to check.
+
+    Returns:
+        True if user is in the admins sheet, False otherwise.
+    """
+    cache_key = f"admin:{telegram_id}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+    try:
+        admins_sheet = spreadsheet.worksheet("admins")
+    except gspread.exceptions.WorksheetNotFound:
+        logger.warning("'admins' sheet not found")
+        set_cached(cache_key, False, ttl=300)
+        return False
+
+    all_admins = admins_sheet.get_all_records()
+
+    for admin in all_admins:
+        if int(admin.get("telegram_id", 0)) == telegram_id:
+            set_cached(cache_key, True, ttl=300)
+            return True
+
+    set_cached(cache_key, False, ttl=300)
+    return False
+
+
+# ============================================================================
+# CAFE REGISTRATION OPERATIONS
+# ============================================================================
+
+
+@retry_on_quota_error()
+def register_cafe_chat(
+    chat_id: int,
+    chat_title: str,
+    brothers_topic_id: int,
+    sisters_topic_id: int,
+) -> bool:
+    """Register a chat for cafe order notifications.
+
+    Args:
+        chat_id: The Telegram chat ID.
+        chat_title: The chat title.
+        brothers_topic_id: Topic ID for brothers orders.
+        sisters_topic_id: Topic ID for sisters orders.
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+    try:
+        chats_sheet = spreadsheet.worksheet("cafe_registered")
+    except gspread.exceptions.WorksheetNotFound:
+        # Create the sheet with headers
+        chats_sheet = spreadsheet.add_worksheet(title="cafe_registered", rows=100, cols=5)
+        chats_sheet.append_row([
+            "chat_id",
+            "chat_title",
+            "brothers_topic_id",
+            "sisters_topic_id",
+            "registered_at",
+        ])
+        logger.info("Created 'cafe_registered' sheet")
+
+    # Check if already registered
+    existing = get_registered_cafe_chat(chat_id)
+    if existing:
+        logger.info(f"Chat {chat_id} already registered")
+        return True
+
+    # Add new registration
+    registered_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    chats_sheet.append_row([
+        chat_id,
+        chat_title,
+        brothers_topic_id,
+        sisters_topic_id,
+        registered_at,
+    ])
+
+    # Invalidate cache
+    invalidate_cache(f"cafe_chat:{chat_id}")
+    invalidate_cache("cafe_chats:all")
+
+    logger.info(f"Registered cafe chat: {chat_title} ({chat_id})")
+    return True
+
+
+@retry_on_quota_error()
+def get_registered_cafe_chat(chat_id: int) -> dict | None:
+    """Get a registered cafe chat by ID.
+
+    Args:
+        chat_id: The Telegram chat ID.
+
+    Returns:
+        Dictionary with chat info or None if not found.
+    """
+    cache_key = f"cafe_chat:{chat_id}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached if cached != "NOT_FOUND" else None
+
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+    try:
+        chats_sheet = spreadsheet.worksheet("cafe_registered")
+    except gspread.exceptions.WorksheetNotFound:
+        set_cached(cache_key, "NOT_FOUND")
+        return None
+
+    all_chats = chats_sheet.get_all_records()
+
+    for chat in all_chats:
+        if int(chat.get("chat_id", 0)) == chat_id:
+            result = {
+                "chat_id": int(chat["chat_id"]),
+                "chat_title": str(chat.get("chat_title", "")),
+                "brothers_topic_id": int(chat.get("brothers_topic_id", 0)),
+                "sisters_topic_id": int(chat.get("sisters_topic_id", 0)),
+            }
+            set_cached(cache_key, result)
+            return result
+
+    set_cached(cache_key, "NOT_FOUND")
+    return None
+
+
+@retry_on_quota_error()
+def deregister_cafe_chat(chat_id: int) -> bool:
+    """Deregister a chat from cafe order notifications.
+
+    Args:
+        chat_id: The Telegram chat ID to deregister.
+
+    Returns:
+        True if successfully deregistered, False if not found or error.
+    """
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+    try:
+        chats_sheet = spreadsheet.worksheet("cafe_registered")
+    except gspread.exceptions.WorksheetNotFound:
+        logger.warning("'cafe_registered' sheet not found")
+        return False
+
+    all_chats = chats_sheet.get_all_records()
+
+    # Find the row to delete (1-indexed, +1 for header)
+    for idx, chat in enumerate(all_chats):
+        if int(chat.get("chat_id", 0)) == chat_id:
+            row_number = idx + 2  # +1 for 0-index, +1 for header row
+            chats_sheet.delete_rows(row_number)
+
+            # Invalidate cache
+            invalidate_cache(f"cafe_chat:{chat_id}")
+            invalidate_cache("cafe_chats:all")
+
+            logger.info(f"Deregistered cafe chat: {chat_id}")
+            return True
+
+    logger.warning(f"Chat {chat_id} not found for deregistration")
+    return False
+
+
+@retry_on_quota_error()
+def get_all_registered_cafe_chats() -> list[dict]:
+    """Get all registered cafe chats.
+
+    Returns:
+        List of registered chat dictionaries.
+    """
+    cache_key = "cafe_chats:all"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+    try:
+        chats_sheet = spreadsheet.worksheet("cafe_registered")
+    except gspread.exceptions.WorksheetNotFound:
+        return []
+
+    all_chats = chats_sheet.get_all_records()
+
+    result = [
+        {
+            "chat_id": int(chat["chat_id"]),
+            "chat_title": str(chat.get("chat_title", "")),
+            "brothers_topic_id": int(chat.get("brothers_topic_id", 0)),
+            "sisters_topic_id": int(chat.get("sisters_topic_id", 0)),
+        }
+        for chat in all_chats
+        if chat.get("chat_id")
+    ]
+
+    set_cached(cache_key, result, ttl=120)
+    return result
+
+
+# ============================================================================
+# CAFE STATE MANAGEMENT
+# ============================================================================
+
+
+def get_cafe_state() -> dict[str, bool]:
+    """Get the current cafe open/closed state.
+
+    Returns:
+        Dict with {"brothers": bool, "sisters": bool} indicating if each side is open.
+    """
+    with _cafe_state_lock:
+        return _cafe_state.copy()
+
+
+def is_cafe_open_for(section: str) -> bool:
+    """Check if the cafe is open for a specific section.
+
+    Args:
+        section: The section to check ("brothers", "sisters", or "general").
+
+    Returns:
+        True if the cafe is accepting orders for that section.
+    """
+    with _cafe_state_lock:
+        section_lower = section.lower()
+        if section_lower in ("brothers", "brother"):
+            return _cafe_state["brothers"]
+        elif section_lower in ("sisters", "sister"):
+            return _cafe_state["sisters"]
+        else:
+            # General items require at least one side to be open
+            return _cafe_state["brothers"] or _cafe_state["sisters"]
+
+
+def open_cafe(brothers: bool = True, sisters: bool = True) -> dict[str, bool]:
+    """Open the cafe for orders.
+
+    Args:
+        brothers: Whether to open the brothers side.
+        sisters: Whether to open the sisters side.
+
+    Returns:
+        The new cafe state.
+    """
+    with _cafe_state_lock:
+        if brothers:
+            _cafe_state["brothers"] = True
+        if sisters:
+            _cafe_state["sisters"] = True
+        logger.info(f"Cafe opened: brothers={_cafe_state['brothers']}, sisters={_cafe_state['sisters']}")
+        return _cafe_state.copy()
+
+
+def close_cafe(brothers: bool = True, sisters: bool = True) -> dict[str, bool]:
+    """Close the cafe for orders.
+
+    Args:
+        brothers: Whether to close the brothers side.
+        sisters: Whether to close the sisters side.
+
+    Returns:
+        The new cafe state.
+    """
+    with _cafe_state_lock:
+        if brothers:
+            _cafe_state["brothers"] = False
+        if sisters:
+            _cafe_state["sisters"] = False
+        logger.info(f"Cafe closed: brothers={_cafe_state['brothers']}, sisters={_cafe_state['sisters']}")
+        return _cafe_state.copy()
+
+
+# ============================================================================
 # MENU OPERATIONS
 # ============================================================================
 
@@ -117,7 +421,7 @@ def get_gspread_client() -> gspread.Client:
 def get_menu_items() -> list[dict]:
     """Get all available menu items from the 'menu' sheet.
 
-    Sheet schema: item, price, gender
+    Sheet schema: item, price, gender, description
 
     Returns:
         List of menu item dictionaries.
@@ -151,6 +455,7 @@ def get_menu_items() -> list[dict]:
             "item": str(item.get("item", "")).strip(),
             "price": price,
             "gender": str(item.get("gender", "")).strip(),
+            "description": str(item.get("description", "")).strip(),
         })
 
     # Filter out empty items
@@ -163,99 +468,66 @@ def get_menu_items() -> list[dict]:
 
 
 # ============================================================================
-# ORDER OPERATIONS
+# ORDER OPERATIONS (Using OrdersCache)
 # ============================================================================
 
 
-@retry_on_quota_error()
 def create_order(
     telegram_id: int,
     telegram_name: str,
     item: str,
     price: float,
+    gender: str = "",
+    notes: str = "",
 ) -> str | None:
-    """Create a new order in the 'orders' sheet.
+    """Create a new order via the cache (batched write to Sheets).
 
     Args:
         telegram_id: Customer's Telegram user ID.
         telegram_name: Customer's display name.
         item: Name of the ordered item.
         price: Price of the item.
+        gender: Gender category of the item (brothers/sisters/general).
+        notes: Special instructions for the order.
 
     Returns:
         Order ID if successful, None otherwise.
     """
-    client = get_gspread_client()
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-
     try:
-        orders_sheet = spreadsheet.worksheet("orders")
-    except gspread.exceptions.WorksheetNotFound:
-        # Create the orders sheet with headers
-        orders_sheet = spreadsheet.add_worksheet(title="orders", rows=1000, cols=8)
-        orders_sheet.append_row([
-            "order_id",
-            "telegram_id",
-            "telegram_name",
-            "item",
-            "price",
-            "status",
-            "created_at",
-            "completed_at",
-        ])
-        logger.info("Created 'orders' sheet")
-
-    # Generate order ID
-    order_id = str(uuid4())[:8].upper()
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # Append order row
-    orders_sheet.append_row([
-        order_id,
-        telegram_id,
-        telegram_name,
-        item,
-        price,
-        "pending",
-        created_at,
-        "",  # completed_at
-    ])
-
-    logger.info(f"Created order {order_id} for {telegram_name}: {item}")
-    return order_id
+        order_id = orders_cache.add_order(
+            telegram_id=telegram_id,
+            telegram_name=telegram_name,
+            item=item,
+            price=price,
+            gender=gender,
+            notes=notes,
+        )
+        logger.info(f"Created order {order_id} for {telegram_name}: {item}")
+        return order_id
+    except Exception as e:
+        logger.error(f"Failed to create order: {e}")
+        return None
 
 
-@retry_on_quota_error()
 def get_pending_orders() -> list[dict]:
-    """Get all pending orders.
+    """Get all pending orders from the cache.
 
     Returns:
         List of pending order dictionaries.
     """
-    client = get_gspread_client()
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    return orders_cache.get_pending_orders()
 
-    try:
-        orders_sheet = spreadsheet.worksheet("orders")
-    except gspread.exceptions.WorksheetNotFound:
-        return []
 
-    all_orders = orders_sheet.get_all_records()
+def get_orders_for_user(telegram_id: int) -> list[dict]:
+    """Get all orders for a specific user from the cache.
 
-    pending = [
-        {
-            "order_id": str(order.get("order_id", "")),
-            "telegram_id": int(order.get("telegram_id", 0)),
-            "telegram_name": str(order.get("telegram_name", "")),
-            "item": str(order.get("item", "")),
-            "price": float(order.get("price", 0)),
-            "created_at": str(order.get("created_at", "")),
-        }
-        for order in all_orders
-        if str(order.get("status", "")).lower() == "pending"
-    ]
+    Args:
+        telegram_id: The user's Telegram ID.
 
-    return pending
+    Returns:
+        List of order dictionaries for the user, sorted by most recent first.
+    """
+    return orders_cache.get_orders_for_user(telegram_id)
 
 
 @retry_on_quota_error()
@@ -266,78 +538,166 @@ def mark_order_ready(order_id: str) -> dict | None:
         order_id: The order ID to mark as ready.
 
     Returns:
-        Dictionary with telegram_id and item, or None if not found.
+        Dictionary with telegram_id, item, gender, and notes, or None if not found.
     """
-    client = get_gspread_client()
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-
-    try:
-        orders_sheet = spreadsheet.worksheet("orders")
-    except gspread.exceptions.WorksheetNotFound:
-        return None
-
-    all_orders = orders_sheet.get_all_records()
-    headers = orders_sheet.row_values(1)
-
-    try:
-        status_col = headers.index("status") + 1
-    except ValueError:
-        return None
-
-    for idx, order in enumerate(all_orders):
-        if str(order.get("order_id", "")) == str(order_id):
-            row_num = idx + 2  # +1 for header, +1 for 1-based index
-
-            # Update status to 'ready'
-            orders_sheet.update_cell(row_num, status_col, "ready")
-
-            logger.info(f"Marked order {order_id} as ready")
-
-            return {
-                "telegram_id": int(order.get("telegram_id", 0)),
-                "item": str(order.get("item", "")),
-            }
-
+    result = orders_cache.update_order_status(order_id, "ready")
+    if result:
+        gender_value = result.get("gender", "")
+        logger.info(
+            f"mark_order_ready {order_id}: gender='{gender_value}', "
+            f"full_result_keys={list(result.keys())}"
+        )
+        return {
+            "telegram_id": result.get("telegram_id"),
+            "item": result.get("item"),
+            "gender": gender_value,
+            "notes": result.get("notes"),
+        }
     return None
 
 
-@retry_on_quota_error()
-def mark_order_completed(order_id: str) -> bool:
-    """Mark an order as completed.
+def mark_order_completed(order_id: str) -> dict | None:
+    """Mark an order as completed via the cache (batched write to Sheets).
 
     Args:
         order_id: The order ID to mark as completed.
 
     Returns:
-        True if successful, False otherwise.
+        Dictionary with order info if successful, None otherwise.
     """
-    client = get_gspread_client()
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    result = orders_cache.update_order_status(order_id, "completed")
+    if result:
+        logger.info(f"Marked order {order_id} as completed (via cache)")
+        return {
+            "telegram_id": result.get("telegram_id"),
+            "telegram_name": result.get("telegram_name"),
+            "item": result.get("item"),
+            "gender": result.get("gender"),
+            "already_completed": result.get("already_completed", False),
+        }
+    logger.error(f"Order {order_id} not found in cache")
+    return None
+
+
+def mark_order_denied(order_id: str) -> dict | None:
+    """Mark an order as denied via the cache (batched write to Sheets).
+
+    Args:
+        order_id: The order ID to mark as denied.
+
+    Returns:
+        Dictionary with order info if successful, None otherwise.
+    """
+    result = orders_cache.update_order_status(order_id, "denied")
+    if result:
+        logger.info(f"Marked order {order_id} as denied (via cache)")
+        return {
+            "telegram_id": result.get("telegram_id"),
+            "telegram_name": result.get("telegram_name"),
+            "item": result.get("item"),
+            "already_processed": result.get("already_processed", False),
+        }
+    logger.error(f"Order {order_id} not found in cache")
+    return None
+
+
+# ============================================================================
+# UNIFIED SYNC PROCESSOR
+# ============================================================================
+
+
+def _perform_unified_sync() -> dict:
+    """Perform a unified sync operation (flush writes + refresh cache).
+
+    Returns:
+        Dict with sync statistics.
+    """
+    stats = {
+        "new_orders_written": 0,
+        "status_updates_written": 0,
+        "cache_entries": 0,
+        "success": True,
+        "error": None,
+    }
 
     try:
-        orders_sheet = spreadsheet.worksheet("orders")
-    except gspread.exceptions.WorksheetNotFound:
-        return False
+        client = get_gspread_client()
 
-    all_orders = orders_sheet.get_all_records()
-    headers = orders_sheet.row_values(1)
+        # 1. Flush pending writes to Google Sheets
+        flush_result = orders_cache.flush_pending_writes(client, SPREADSHEET_ID)
+        stats["new_orders_written"] = flush_result["new_orders_written"]
+        stats["status_updates_written"] = flush_result["status_updates_written"]
 
+        if not flush_result["success"]:
+            stats["success"] = False
+            stats["error"] = flush_result["error"]
+
+        # 2. Refresh cache from Google Sheets
+        cache_count = orders_cache.refresh_from_sheet(client, SPREADSHEET_ID)
+        stats["cache_entries"] = cache_count
+
+    except Exception as e:
+        stats["success"] = False
+        stats["error"] = str(e)
+        logger.error(f"Unified sync failed: {e}")
+
+    return stats
+
+
+async def unified_sync_processor():
+    """Single background processor that handles both writes and cache refresh.
+
+    This handles:
+    1. Flush pending writes from orders_cache to Google Sheets
+    2. Refresh the orders_cache from Google Sheets
+
+    This ensures the cache is always consistent with the sheet state.
+    """
+    sync_interval = orders_cache.sync_interval  # 10 seconds
+    logger.info(f"Unified sync processor started (interval: {sync_interval}s)")
+
+    # Initial sync - load existing orders into cache
     try:
-        status_col = headers.index("status") + 1
-        completed_at_col = headers.index("completed_at") + 1
-    except ValueError:
-        return False
+        stats = await asyncio.get_event_loop().run_in_executor(
+            None, _perform_unified_sync
+        )
+        logger.info(
+            f"Initial sync complete: {stats['cache_entries']} orders loaded"
+        )
+    except Exception as e:
+        logger.error(f"Failed to perform initial sync: {e}")
+        orders_cache._initialized = True  # Allow bot to start anyway
 
-    for idx, order in enumerate(all_orders):
-        if str(order.get("order_id", "")) == str(order_id):
-            row_num = idx + 2
+    # Periodic sync loop
+    try:
+        while True:
+            await asyncio.sleep(sync_interval)
 
-            completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                stats = await asyncio.get_event_loop().run_in_executor(
+                    None, _perform_unified_sync
+                )
+                # Only log if there were writes
+                if stats["new_orders_written"] > 0 or stats["status_updates_written"] > 0:
+                    logger.info(
+                        f"Sync: wrote {stats['new_orders_written']} orders, "
+                        f"{stats['status_updates_written']} updates, "
+                        f"refreshed {stats['cache_entries']} cache entries"
+                    )
+            except asyncio.CancelledError:
+                raise  # Re-raise to exit the loop
+            except Exception as e:
+                logger.error(f"Error in unified sync: {e}")
 
-            orders_sheet.update_cell(row_num, status_col, "completed")
-            orders_sheet.update_cell(row_num, completed_at_col, completed_at)
-
-            logger.info(f"Marked order {order_id} as completed")
-            return True
-
-    return False
+    except asyncio.CancelledError:
+        # Graceful shutdown - perform final sync
+        logger.info("Unified sync processor shutting down, performing final sync...")
+        try:
+            stats = _perform_unified_sync()
+            logger.info(
+                f"Final sync complete: {stats['new_orders_written']} orders, "
+                f"{stats['status_updates_written']} updates written"
+            )
+        except Exception as e:
+            logger.error(f"Final sync failed: {e}")
+        raise  # Re-raise so the task is properly marked as cancelled
