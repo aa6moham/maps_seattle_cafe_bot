@@ -1,0 +1,22 @@
+# fly.toml - MAPS Cafe Bot
+# See https://fly.io/docs/reference/configuration/
+
+app = 'maps-seattle-cafe-bot'
+primary_region = 'sjc'
+
+# No HTTP service needed - this is a worker process (Telegram polling)
+
+[env]
+  TZ = "America/Los_Angeles"
+
+[processes]
+  app = "python main.py"
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
+
+# Keep at least one machine running (bot needs to be always on)
+[deploy]
+  strategy = "immediate"
