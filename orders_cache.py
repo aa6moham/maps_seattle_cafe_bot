@@ -36,6 +36,20 @@ from logger import setup_logger
 logger = setup_logger("maps_cafe_bot.orders_cache")
 
 
+def _escape_sheet_value(value: str) -> str:
+    """Escape a value to prevent Google Sheets from interpreting it as a formula.
+    
+    Args:
+        value: The string value to escape.
+        
+    Returns:
+        The escaped value (prefixed with ' if it starts with formula characters).
+    """
+    if value and value[0] in ('=', '+', '-', '@'):
+        return "'" + value
+    return value
+
+
 class OrdersCache:
     """Unified in-memory cache for order data with background sync.
 
@@ -81,7 +95,7 @@ class OrdersCache:
 
         # Flag to indicate if cache has been initialized
         self._initialized: bool = False
-        
+
         # Performance tracking
         self._orders_processed: int = 0
         self._peak_pending: int = 0
@@ -444,14 +458,14 @@ class OrdersCache:
                         order["item"],
                         order["price"],
                         order["gender"],
-                        order.get("notes", ""),
+                        _escape_sheet_value(order.get("notes", "")),
                         order["status"],
                         order["created_at"],
                         order["completed_at"],
                     ]
                     for order in new_orders
                 ]
-                orders_sheet.append_rows(rows)
+                orders_sheet.append_rows(rows, value_input_option="RAW")
                 self.mark_new_orders_synced()
                 result["new_orders_written"] = len(new_orders)
                 logger.info(f"Wrote {len(new_orders)} new orders to sheet (batch)")
@@ -473,7 +487,7 @@ class OrdersCache:
                 # Build batch update cells
                 cells_to_update = []
                 synced_order_ids = []
-                
+
                 for idx, order in enumerate(all_orders):
                     order_id = str(order.get("order_id", ""))
                     if order_id in status_updates:
@@ -494,7 +508,7 @@ class OrdersCache:
                     for cell in cells_to_update:
                         status_cells.append(gspread.Cell(cell["row"], status_col, cell["status"]))
                         completed_cells.append(gspread.Cell(cell["row"], completed_at_col, cell["completed_at"]))
-                    
+
                     orders_sheet.update_cells(status_cells + completed_cells)
 
                 self.mark_status_updates_synced(synced_order_ids)

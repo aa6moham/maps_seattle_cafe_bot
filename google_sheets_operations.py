@@ -19,8 +19,8 @@ from private.constants import SPREADSHEET_ID
 
 logger = setup_logger(__name__)
 
-# Global orders cache instance (5s sync for faster persistence under high load)
-orders_cache = OrdersCache(sync_interval=10.0)
+# Global orders cache instance
+orders_cache = OrdersCache(sync_interval=20.0)
 
 # Cafe state management (in-memory with persistence to sheet)
 # State: {"brothers": True/False, "sisters": True/False}
@@ -149,14 +149,117 @@ def is_admin(telegram_id: int) -> bool:
         return False
 
     all_admins = admins_sheet.get_all_records()
+    logger.info(f"Checking admin status for {telegram_id}, found {len(all_admins)} admins in sheet")
 
     for admin in all_admins:
-        if int(admin.get("telegram_id", 0)) == telegram_id:
-            set_cached(cache_key, True, ttl=300)
-            return True
+        try:
+            admin_id_raw = admin.get("telegram_id", 0)
+            # Handle string or int values, strip whitespace
+            if isinstance(admin_id_raw, str):
+                admin_id_raw = admin_id_raw.strip()
+            admin_id = int(admin_id_raw)
+            
+            logger.debug(f"Comparing {telegram_id} with admin {admin_id}")
+            
+            if admin_id == telegram_id:
+                logger.info(f"User {telegram_id} is an admin")
+                set_cached(cache_key, True, ttl=300)
+                return True
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Invalid telegram_id in admins sheet: {admin.get('telegram_id')} - {e}")
+            continue
 
+    logger.info(f"User {telegram_id} is NOT an admin")
     set_cached(cache_key, False, ttl=300)
     return False
+
+
+@retry_on_quota_error()
+def get_admin_count() -> int:
+    """Get the number of admins in the admins sheet.
+
+    Returns:
+        Number of valid admins (with numeric telegram_id).
+    """
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+    try:
+        admins_sheet = spreadsheet.worksheet("admins")
+    except gspread.exceptions.WorksheetNotFound:
+        return 0
+
+    all_admins = admins_sheet.get_all_records()
+    count = 0
+    for admin in all_admins:
+        try:
+            admin_id_raw = admin.get("telegram_id", 0)
+            if isinstance(admin_id_raw, str):
+                admin_id_raw = admin_id_raw.strip()
+            int(admin_id_raw)  # Validate it's a number
+            count += 1
+        except (ValueError, TypeError):
+            continue
+    return count
+
+
+@retry_on_quota_error()
+def register_admin(telegram_id: int, telegram_name: str) -> bool:
+    """Register a user as an admin.
+
+    Args:
+        telegram_id: The Telegram user ID (must be a numeric ID, not username).
+        telegram_name: The Telegram display name or username.
+
+    Returns:
+        True if successfully registered, False if already exists or error.
+    """
+    # Validate telegram_id is a proper numeric ID
+    if not isinstance(telegram_id, int) or telegram_id <= 0:
+        logger.error(f"Invalid telegram_id: {telegram_id} (must be a positive integer)")
+        return False
+
+    # Ensure telegram_name is different from telegram_id (avoid storing ID as name)
+    if telegram_name == str(telegram_id):
+        logger.warning(f"telegram_name is same as telegram_id ({telegram_id}), using 'Unknown'")
+        telegram_name = "Unknown"
+
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+    try:
+        admins_sheet = spreadsheet.worksheet("admins")
+    except gspread.exceptions.WorksheetNotFound:
+        # Create the sheet with headers
+        admins_sheet = spreadsheet.add_worksheet(title="admins", rows=100, cols=3)
+        admins_sheet.append_row(["telegram_id", "telegram_name", "registered_at"])
+        logger.info("Created 'admins' sheet")
+
+    # Check if already registered
+    all_admins = admins_sheet.get_all_records()
+    for admin in all_admins:
+        try:
+            admin_id_raw = admin.get("telegram_id", 0)
+            if isinstance(admin_id_raw, str):
+                admin_id_raw = admin_id_raw.strip()
+            if int(admin_id_raw) == telegram_id:
+                logger.info(f"User {telegram_id} is already an admin")
+                return False
+        except (ValueError, TypeError):
+            continue
+
+    # Add new admin - use int() to ensure numeric storage
+    registered_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    admins_sheet.append_row(
+        [int(telegram_id), str(telegram_name), registered_at],
+        value_input_option="RAW",  # Prevents Google Sheets from interpreting values
+    )
+
+    # Invalidate cache
+    invalidate_cache(f"admin:{telegram_id}")
+
+    logger.info(f"Registered new admin: {telegram_name} ({telegram_id})")
+    return True
 
 
 # ============================================================================

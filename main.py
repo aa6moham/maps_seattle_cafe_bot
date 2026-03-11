@@ -12,6 +12,7 @@ from google_sheets_operations import (
     close_cafe,
     create_order,
     deregister_cafe_chat,
+    get_admin_count,
     get_all_registered_cafe_chats,
     get_cafe_state,
     get_menu_items,
@@ -23,6 +24,7 @@ from google_sheets_operations import (
     mark_order_denied,
     mark_order_ready,
     open_cafe,
+    register_admin,
     register_cafe_chat,
     unified_sync_processor,
 )
@@ -143,7 +145,7 @@ async def mystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /order command - Display menu items as buttons."""
+    """Handle /order command - Ask user to select their gender first."""
     user = update.effective_user
     chat = update.effective_chat
 
@@ -152,6 +154,22 @@ async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     logger.info(f"User {user.id} ({user.full_name}) requested menu")
+
+    # Check if user already has a pending order (rate limiting)
+    user_orders = get_orders_for_user(user.id)
+    pending_orders = [o for o in user_orders if o.get("status", "").lower() == "pending"]
+
+    if pending_orders:
+        pending_order = pending_orders[0]
+        await update.message.reply_text(
+            "⏳ *You Already Have a Pending Order*\n\n"
+            f"🍽️ *Item:* {pending_order.get('item', 'Unknown')}\n"
+            f"📋 *Order ID:* `{pending_order.get('order_id', 'N/A')}`\n\n"
+            "Please wait for your current order to be completed before placing a new one.\n\n"
+            "_Use /mystatus to check your order status._",
+            parse_mode="Markdown",
+        )
+        return
 
     # Check if cafe is open
     cafe_state = get_cafe_state()
@@ -168,79 +186,18 @@ async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Fetch menu items from Google Sheet
-    menu_items = get_menu_items()
-
-    if not menu_items:
-        await update.message.reply_text(
-            "😔 Sorry, the menu is currently unavailable. Please try again later."
-        )
-        return
-
-    # Group items by gender
-    brothers_items = []
-    sisters_items = []
-    all_items = []
-
-    for item in menu_items:
-        gender = item["gender"].lower() if item["gender"] else ""
-        if gender in ("brothers", "brother"):
-            brothers_items.append(item)
-        elif gender in ("sisters", "sister"):
-            sisters_items.append(item)
-        elif gender == "both":
-            # Items available for both appear in both sections
-            brothers_items.append(item)
-            sisters_items.append(item)
-        else:
-            all_items.append(item)
-
-    # Build keyboard with menu items grouped by gender
-    # Callback data includes section so we know pickup location
-    # Only show sections that are open
+    # Build gender selection buttons (only show open sections)
     keyboard = []
 
-    if brothers_items and brothers_open:
+    if brothers_open:
         keyboard.append(
-            [InlineKeyboardButton("🧔 Brothers", callback_data="header:brothers")]
+            [InlineKeyboardButton("🧔 Brother", callback_data="gender:brothers")]
         )
-        for item in brothers_items:
-            button_text = f"{item['item']} - ${item['price']:.2f}"
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        button_text, callback_data=f"menu:{item['item_id']}:brothers"
-                    )
-                ]
-            )
 
-    if sisters_items and sisters_open:
+    if sisters_open:
         keyboard.append(
-            [InlineKeyboardButton("🧕 Sisters", callback_data="header:sisters")]
+            [InlineKeyboardButton("🧕 Sister", callback_data="gender:sisters")]
         )
-        for item in sisters_items:
-            button_text = f"{item['item']} - ${item['price']:.2f}"
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        button_text, callback_data=f"menu:{item['item_id']}:sisters"
-                    )
-                ]
-            )
-
-    if all_items and (brothers_open or sisters_open):
-        keyboard.append(
-            [InlineKeyboardButton("🤲 Everyone", callback_data="header:all")]
-        )
-        for item in all_items:
-            button_text = f"{item['item']} - ${item['price']:.2f}"
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        button_text, callback_data=f"menu:{item['item_id']}:general"
-                    )
-                ]
-            )
 
     # Build status message for partial opening
     if brothers_open and sisters_open:
@@ -253,10 +210,126 @@ async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_msg = ""
 
     await update.message.reply_text(
-        "🕌 *MAPS Masjid Cafe Menu*\n\n"
+        "🕌 *MAPS Masjid Cafe*\n\n"
         "_All proceeds go to support our masjid!_\n"
         f"{status_msg}\n"
+        "Please select your section:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_gender_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle gender selection and display appropriate menu."""
+    query = update.callback_query
+    await query.answer()
+
+    gender = query.data.split(":")[1]  # "brothers" or "sisters"
+
+    # Store selected gender in user_data
+    context.user_data["selected_gender"] = gender
+
+    # Fetch menu items from Google Sheet
+    menu_items = get_menu_items()
+
+    if not menu_items:
+        await query.edit_message_text(
+            "😔 Sorry, the menu is currently unavailable. Please try again later."
+        )
+        return
+
+    # Filter items for selected gender
+    filtered_items = []
+
+    for item in menu_items:
+        item_gender = item["gender"].lower() if item["gender"] else ""
+
+        # Include item if:
+        # - It's for the selected gender
+        # - It's for "both"
+        # - It has no gender restriction (general item)
+        if item_gender in (gender, gender[:-1]):  # "brothers" or "brother"
+            filtered_items.append(item)
+        elif item_gender == "both":
+            filtered_items.append(item)
+        elif item_gender == "":
+            filtered_items.append(item)
+
+    if not filtered_items:
+        await query.edit_message_text(
+            "😔 Sorry, there are no menu items available for your section right now."
+        )
+        return
+
+    # Build keyboard with menu items
+    keyboard = []
+
+    for item in filtered_items:
+        button_text = f"{item['item']} - ${item['price']:.2f}"
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    button_text, callback_data=f"menu:{item['item_id']}:{gender}"
+                )
+            ]
+        )
+
+    # Add back button
+    keyboard.append(
+        [InlineKeyboardButton("⬅️ Back", callback_data="gender:back")]
+    )
+
+    gender_label = "🧔 Brothers" if gender == "brothers" else "🧕 Sisters"
+
+    await query.edit_message_text(
+        f"🕌 *MAPS Masjid Cafe Menu*\n\n"
+        f"*Section:* {gender_label}\n"
+        "_All proceeds go to support our masjid!_\n\n"
         "Tap an item to order:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_gender_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle back button from menu to gender selection."""
+    query = update.callback_query
+    await query.answer()
+
+    # Clear selected gender
+    context.user_data.pop("selected_gender", None)
+
+    # Check if cafe is still open
+    cafe_state = get_cafe_state()
+    brothers_open = cafe_state["brothers"]
+    sisters_open = cafe_state["sisters"]
+
+    if not brothers_open and not sisters_open:
+        await query.edit_message_text(
+            "🚫 *Cafe is Currently Closed*\n\n"
+            "We are not accepting orders at this time.\n\n"
+            "Please check back later, In Shaa Allah!",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Build gender selection buttons
+    keyboard = []
+
+    if brothers_open:
+        keyboard.append(
+            [InlineKeyboardButton("🧔 Brother", callback_data="gender:brothers")]
+        )
+
+    if sisters_open:
+        keyboard.append(
+            [InlineKeyboardButton("🧕 Sister", callback_data="gender:sisters")]
+        )
+
+    await query.edit_message_text(
+        "🕌 *MAPS Masjid Cafe*\n\n"
+        "_All proceeds go to support our masjid!_\n\n"
+        "Please select your section:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
@@ -747,13 +820,118 @@ async def deregister_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ============================================================================
+# REGISTER ADMIN COMMAND
+# ============================================================================
+
+
+async def register_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Register a user as an admin (/register_admin).
+
+    Bootstrap behavior: If no admins exist, the first user to run this
+    command becomes the initial admin. After that, only existing admins
+    can register new admins.
+
+    Usage:
+        /register_admin - Register yourself (bootstrap or admin only)
+        /register_admin @username - Admin registers another user (reply to their message)
+    """
+    user = update.effective_user
+    user_id = user.id
+    user_name = user.full_name or user.username or str(user_id)
+
+    logger.info(f"register_admin_command called by {user_name} ({user_id})")
+
+    # Check if this is a bootstrap situation (no admins exist)
+    admin_count = get_admin_count()
+    is_bootstrap = admin_count == 0
+
+    if is_bootstrap:
+        # Bootstrap: First user becomes admin
+        logger.info(f"Bootstrap mode: Registering first admin {user_name} ({user_id})")
+        success = register_admin(user_id, user_name)
+        if success:
+            await update.message.reply_text(
+                "🎉 *Welcome, First Admin!*\n\n"
+                f"✅ You have been registered as the initial admin.\n"
+                f"👤 Name: {user_name}\n"
+                f"🆔 ID: `{user_id}`\n\n"
+                "_You can now register other admins using this command._",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Failed to register admin. Please try again."
+            )
+        return
+
+    # Not bootstrap: Check if caller is an existing admin
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "🚫 *Admin Access Required*\n\n"
+            "Only existing admins can register new admins.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Check if registering someone else via reply
+    target_user = None
+    target_id = None
+    target_name = None
+
+    if update.message.reply_to_message:
+        # Admin is replying to someone's message to register them
+        target_user = update.message.reply_to_message.from_user
+        if target_user:
+            target_id = target_user.id
+            target_name = target_user.full_name or target_user.username or str(target_id)
+    else:
+        # Admin is registering themselves
+        target_id = user_id
+        target_name = user_name
+
+    if not target_id:
+        await update.message.reply_text(
+            "❌ Could not identify user to register.\n\n"
+            "Usage:\n"
+            "• `/register_admin` - Register yourself\n"
+            "• Reply to a user's message with `/register_admin` - Register that user",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Register the target user
+    success = register_admin(target_id, target_name)
+
+    if success:
+        if target_id == user_id:
+            await update.message.reply_text(
+                "✅ *Admin Registered!*\n\n"
+                f"👤 Name: {target_name}\n"
+                f"🆔 ID: `{target_id}`",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                "✅ *New Admin Registered!*\n\n"
+                f"👤 Name: {target_name}\n"
+                f"🆔 ID: `{target_id}`\n\n"
+                f"_Registered by {user_name}_",
+                parse_mode="Markdown",
+            )
+    else:
+        await update.message.reply_text(
+            f"ℹ️ {target_name} is already registered as an admin."
+        )
+
+
+# ============================================================================
 # CAFE OPEN/CLOSE COMMANDS (Admin Only)
 # ============================================================================
 
 
 async def _send_admin_denied_and_cleanup(update: Update, delay: float = 5.0):
     """Send admin access denied message and auto-delete after delay.
-    
+
     Args:
         update: The Telegram update object.
         delay: Seconds to wait before deleting messages.
@@ -762,7 +940,7 @@ async def _send_admin_denied_and_cleanup(update: Update, delay: float = 5.0):
         "🚫 _Admin access required. This message will be deleted._",
         parse_mode="Markdown",
     )
-    
+
     # Wait and then delete both messages
     await asyncio.sleep(delay)
     try:
@@ -826,10 +1004,80 @@ async def open_sisters_command(update: Update, context: ContextTypes.DEFAULT_TYP
         "☕ *Sisters Cafe is now OPEN!*\n\n"
         f"🧔 Brothers: {'✅ Accepting orders' if state['brothers'] else '❌ Closed'}\n"
         f"🧕 Sisters: ✅ Accepting orders\n\n"
-        "_Bismillah!_",
+    "_Bismillah!_",
         parse_mode="Markdown",
     )
     logger.info(f"Sisters cafe opened by admin {user.id} ({user.full_name})")
+
+
+async def _deny_pending_orders_and_notify(
+    bot, gender_filter: str | None = None
+) -> int:
+    """Deny pending orders and notify users.
+
+    Args:
+        bot: The Telegram bot instance.
+        gender_filter: If set, only deny orders for this gender ("brothers" or "sisters").
+                      If None, deny all pending orders.
+
+    Returns:
+        Number of orders denied.
+    """
+    pending = get_pending_orders()
+    denied_count = 0
+
+    for order in pending:
+        order_gender = order.get("gender", "").lower()
+
+        # Filter by gender if specified
+        if gender_filter:
+            # Match "brothers"/"brother" or "sisters"/"sister"
+            if gender_filter == "brothers" and order_gender not in ("brothers", "brother"):
+                continue
+            if gender_filter == "sisters" and order_gender not in ("sisters", "sister"):
+                continue
+
+        order_id = order.get("order_id")
+        telegram_id = order.get("telegram_id")
+        item = order.get("item", "Unknown")
+
+        # Deny the order
+        result = mark_order_denied(order_id)
+
+        if result and not result.get("already_processed"):
+            denied_count += 1
+
+            # Notify the user
+            try:
+                if gender_filter:
+                    section = "🧔 Brothers" if gender_filter == "brothers" else "🧕 Sisters"
+                    message = (
+                        f"🚫 *Order Cancelled - {section} Section Closed*\n\n"
+                        f"🍽️ *Item:* {item}\n"
+                        f"📋 *Order ID:* `{order_id}`\n\n"
+                        f"The {section.split()[1].lower()} section has been closed. "
+                        f"Your order has been cancelled.\n\n"
+                        "_We apologize for the inconvenience. Please try again later!_"
+                    )
+                else:
+                    message = (
+                        f"🚫 *Order Cancelled - Cafe Closed*\n\n"
+                        f"🍽️ *Item:* {item}\n"
+                        f"📋 *Order ID:* `{order_id}`\n\n"
+                        "The cafe has been closed. Your order has been cancelled.\n\n"
+                        "_We apologize for the inconvenience. Please try again later!_"
+                    )
+
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=message,
+                    parse_mode="Markdown",
+                )
+                logger.info(f"Notified user {telegram_id} about cancelled order {order_id}")
+            except Exception as e:
+                logger.error(f"Failed to notify user {telegram_id} about cancelled order: {e}")
+
+    return denied_count
 
 
 async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -841,14 +1089,22 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     close_cafe(brothers=True, sisters=True)
+
+    # Deny all pending orders and notify users
+    denied_count = await _deny_pending_orders_and_notify(context.bot, gender_filter=None)
+
+    denied_msg = ""
+    if denied_count > 0:
+        denied_msg = f"\n\n⚠️ _{denied_count} pending order(s) have been cancelled and users notified._"
+
     await update.message.reply_text(
         "🚫 *Cafe is now CLOSED*\n\n"
         "🧔 Brothers: ❌ Not accepting orders\n"
         "🧕 Sisters: ❌ Not accepting orders\n\n"
-        "_JazakAllah Khair for your service today!_",
+        f"_JazakAllah Khair for your service today!_{denied_msg}",
         parse_mode="Markdown",
     )
-    logger.info(f"Cafe closed by admin {user.id} ({user.full_name})")
+    logger.info(f"Cafe closed by admin {user.id} ({user.full_name}), {denied_count} orders denied")
 
 
 async def close_brothers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -860,14 +1116,22 @@ async def close_brothers_command(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     state = close_cafe(brothers=True, sisters=False)
+
+    # Deny brothers pending orders and notify users
+    denied_count = await _deny_pending_orders_and_notify(context.bot, gender_filter="brothers")
+
+    denied_msg = ""
+    if denied_count > 0:
+        denied_msg = f"\n\n⚠️ _{denied_count} brothers order(s) have been cancelled and users notified._"
+
     await update.message.reply_text(
         "🚫 *Brothers Cafe is now CLOSED*\n\n"
         f"🧔 Brothers: ❌ Not accepting orders\n"
         f"🧕 Sisters: {'✅ Accepting orders' if state['sisters'] else '❌ Closed'}\n\n"
-        "_JazakAllah Khair!_",
+        f"_JazakAllah Khair!_{denied_msg}",
         parse_mode="Markdown",
     )
-    logger.info(f"Brothers cafe closed by admin {user.id} ({user.full_name})")
+    logger.info(f"Brothers cafe closed by admin {user.id} ({user.full_name}), {denied_count} orders denied")
 
 
 async def close_sisters_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -879,14 +1143,22 @@ async def close_sisters_command(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     state = close_cafe(brothers=False, sisters=True)
+
+    # Deny sisters pending orders and notify users
+    denied_count = await _deny_pending_orders_and_notify(context.bot, gender_filter="sisters")
+
+    denied_msg = ""
+    if denied_count > 0:
+        denied_msg = f"\n\n⚠️ _{denied_count} sisters order(s) have been cancelled and users notified._"
+
     await update.message.reply_text(
         "🚫 *Sisters Cafe is now CLOSED*\n\n"
         f"🧔 Brothers: {'✅ Accepting orders' if state['brothers'] else '❌ Closed'}\n"
         f"🧕 Sisters: ❌ Not accepting orders\n\n"
-        "_JazakAllah Khair!_",
+        f"_JazakAllah Khair!_{denied_msg}",
         parse_mode="Markdown",
     )
-    logger.info(f"Sisters cafe closed by admin {user.id} ({user.full_name})")
+    logger.info(f"Sisters cafe closed by admin {user.id} ({user.full_name}), {denied_count} orders denied")
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1123,7 +1395,7 @@ async def handle_order_complete(update: Update, context: ContextTypes.DEFAULT_TY
         # Get item and determine pickup location
         item = result.get("item", "order")
         gender = result.get("gender", "")
-        
+
         logger.info(f"Order {order_id} complete - gender field value: '{gender}'")
 
         gender_lower = gender.lower() if gender else ""
@@ -1320,6 +1592,7 @@ def main():
     app.add_handler(CommandHandler("orders", orders_command))
     app.add_handler(CommandHandler("register", register_command))
     app.add_handler(CommandHandler("deregister", deregister_command))
+    app.add_handler(CommandHandler("register_admin", register_admin_command))
     app.add_handler(CommandHandler("status", status_command))
 
     # Cafe open/close commands (admin only)
@@ -1331,6 +1604,12 @@ def main():
     app.add_handler(CommandHandler("close_sisters", close_sisters_command))
 
     # Register callback handlers
+    app.add_handler(
+        CallbackQueryHandler(handle_gender_selection, pattern=r"^gender:(brothers|sisters)$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(handle_gender_back, pattern=r"^gender:back$")
+    )
     app.add_handler(CallbackQueryHandler(handle_header_click, pattern=r"^header:"))
     app.add_handler(CallbackQueryHandler(handle_menu_selection, pattern=r"^menu:"))
     app.add_handler(
