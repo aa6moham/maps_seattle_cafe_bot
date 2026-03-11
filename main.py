@@ -6,8 +6,6 @@ Orders are tracked in Google Sheets and staff can manage them.
 
 import asyncio
 
-import asyncio
-
 from google_sheets_operations import (
     close_cafe,
     create_order,
@@ -29,6 +27,12 @@ from google_sheets_operations import (
     unified_sync_processor,
 )
 from logger import setup_logger
+from order_workflows import (
+    OrderData,
+    get_workflow,
+    get_brothers_workflow,
+    get_sisters_workflow,
+)
 from private.constants import BOT_TOKEN, BOT_USERNAME
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden
@@ -220,75 +224,39 @@ async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_gender_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle gender selection and display appropriate menu."""
+    """Handle gender selection (Brother/Sister) - Show appropriate menu.
+
+    Uses the workflow system to get section-specific menu and behavior.
+    """
     query = update.callback_query
     await query.answer()
 
-    gender = query.data.split(":")[1]  # "brothers" or "sisters"
+    # Parse callback data: gender:{section}
+    section = query.data.split(":")[1]  # "brothers" or "sisters"
 
-    # Store selected gender in user_data
-    context.user_data["selected_gender"] = gender
-
-    # Fetch menu items from Google Sheet
-    menu_items = get_menu_items()
-
-    if not menu_items:
+    # Get the workflow for this section
+    workflow = get_workflow(section)
+    if not workflow:
         await query.edit_message_text(
-            "😔 Sorry, the menu is currently unavailable. Please try again later."
+            "❌ Invalid section. Please try /order again."
         )
         return
 
-    # Filter items for selected gender
-    filtered_items = []
+    # Store the selected section/gender
+    context.user_data["selected_gender"] = section
 
-    for item in menu_items:
-        item_gender = item["gender"].lower() if item["gender"] else ""
-
-        # Include item if:
-        # - It's for the selected gender
-        # - It's for "both"
-        # - It has no gender restriction (general item)
-        if item_gender in (gender, gender[:-1]):  # "brothers" or "brother"
-            filtered_items.append(item)
-        elif item_gender == "both":
-            filtered_items.append(item)
-        elif item_gender == "":
-            filtered_items.append(item)
-
-    if not filtered_items:
+    # Check if this section is open
+    if not workflow.is_open():
         await query.edit_message_text(
-            "😔 Sorry, there are no menu items available for your section right now."
+            f"🚫 *{workflow.display_name} Section is Currently Closed*\n\n"
+            "We are not accepting orders for this section at this time.\n\n"
+            "Please check back later, In Shaa Allah!",
+            parse_mode="Markdown",
         )
         return
 
-    # Build keyboard with menu items
-    keyboard = []
-
-    for item in filtered_items:
-        button_text = f"{item['item']} - ${item['price']:.2f}"
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    button_text, callback_data=f"menu:{item['item_id']}:{gender}"
-                )
-            ]
-        )
-
-    # Add back button
-    keyboard.append(
-        [InlineKeyboardButton("⬅️ Back", callback_data="gender:back")]
-    )
-
-    gender_label = "🧔 Brothers" if gender == "brothers" else "🧕 Sisters"
-
-    await query.edit_message_text(
-        f"🕌 *MAPS Masjid Cafe Menu*\n\n"
-        f"*Section:* {gender_label}\n"
-        "_All proceeds go to support our masjid!_\n\n"
-        "Tap an item to order:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown",
-    )
+    # Use the workflow to show the menu
+    await workflow.show_menu(query, context)
 
 
 async def handle_gender_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -347,7 +315,11 @@ async def handle_header_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle menu item selection - Show item details and options."""
+    """Handle menu item selection - Start drink customization flow.
+
+    Flow for Sisters: Shots → Decaf → Temperature → Syrup → Instructions → Confirm
+    Flow for Brothers: Decaf → Temperature → Syrup → Instructions → Confirm
+    """
     query = update.callback_query
     await query.answer()
 
@@ -355,6 +327,9 @@ async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TY
     parts = query.data.split(":")
     item_id = parts[1]
     section = parts[2] if len(parts) > 2 else "general"
+
+    # Get the workflow for this section
+    workflow = get_workflow(section)
 
     # Fetch the specific menu item
     menu_items = get_menu_items()
@@ -367,34 +342,323 @@ async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TY
     name = item["item"]
     price = item["price"]
     description = item.get("description", "")
+    temperature_options = item.get("temperature_options", [])
+    syrup_options = item.get("syrup_options", [])
 
     # Store selection in user context for confirmation
-    # Use section (from button clicked) instead of item's gender for pickup location
     context.user_data["pending_order"] = {
         "item_id": item_id,
         "item": name,
         "price": price,
         "section": section,
         "description": description,
-        "notes": "",  # Will be filled if user adds special instructions
+        "notes": "",
+        "shots": "",
+        "decaf": "",
+        "temperature": "",
+        "syrup": "",
+        "temperature_options": temperature_options,
+        "syrup_options": syrup_options,
     }
     # Clear any waiting state
     context.user_data.pop("awaiting_instructions", None)
 
-    # Format pickup location based on section clicked
+    # Start the customization flow based on section
+    # Sisters get shots selection first, brothers skip to decaf
     if section == "sisters":
-        pickup_note = "🧕 _Pickup: Kitchen area (sisters section)_"
-    elif section == "brothers":
-        pickup_note = "🧔 _Pickup: Upstairs kitchen area (brothers section)_"
+        await show_shots_selection(query, context)
     else:
-        pickup_note = ""
+        await show_decaf_selection(query, context)
 
-    # Build item details message
-    item_details = f"*{name}*\n💰 *Price:* ${price:.2f}"
-    if description:
-        item_details += f"\n\n📝 _{description}_"
-    if pickup_note:
-        item_details += f"\n\n{pickup_note}"
+
+# ============================================================================
+# DRINK CUSTOMIZATION HANDLERS
+# ============================================================================
+
+
+async def show_shots_selection(query, context):
+    """Show shots selection (Sisters only)."""
+    pending_order = context.user_data.get("pending_order")
+    if not pending_order:
+        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        return
+
+    keyboard = [
+        [
+            InlineKeyboardButton("1 Shot", callback_data="customize:shots:1"),
+            InlineKeyboardButton("2 Shots", callback_data="customize:shots:2"),
+        ],
+        [
+            InlineKeyboardButton("3 Shots", callback_data="customize:shots:3"),
+            InlineKeyboardButton("4 Shots", callback_data="customize:shots:4"),
+        ],
+        [InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")],
+    ]
+
+    await query.edit_message_text(
+        f"☕ *Customize Your Order*\n\n"
+        f"*Item:* {pending_order['item']}\n"
+        f"💰 *Price:* ${pending_order['price']:.2f}\n\n"
+        f"*Step 1: Number of Espresso Shots*\n\n"
+        f"How many shots would you like?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_shots_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle shots selection callback."""
+    query = update.callback_query
+    await query.answer()
+
+    pending_order = context.user_data.get("pending_order")
+    if not pending_order:
+        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        return
+
+    # Parse: customize:shots:{value}
+    shots = query.data.split(":")[2]
+    pending_order["shots"] = shots
+
+    # Next step: decaf selection
+    await show_decaf_selection(query, context)
+
+
+async def show_decaf_selection(query, context):
+    """Show decaf/caffeinated selection (Both sections)."""
+    pending_order = context.user_data.get("pending_order")
+    if not pending_order:
+        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        return
+
+    section = pending_order.get("section", "general")
+    step_num = "2" if section == "sisters" else "1"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("☕ Caffeinated", callback_data="customize:decaf:Caffeinated"),
+            InlineKeyboardButton("🌙 Decaf", callback_data="customize:decaf:Decaf"),
+        ],
+        [InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")],
+    ]
+
+    # Show current selections
+    selections = []
+    if pending_order.get("shots"):
+        selections.append(f"☕ Shots: {pending_order['shots']}")
+
+    selections_text = "\n".join(selections) if selections else ""
+    if selections_text:
+        selections_text = f"\n\n📋 *Your Selections:*\n{selections_text}"
+
+    await query.edit_message_text(
+        f"☕ *Customize Your Order*\n\n"
+        f"*Item:* {pending_order['item']}\n"
+        f"💰 *Price:* ${pending_order['price']:.2f}"
+        f"{selections_text}\n\n"
+        f"*Step {step_num}: Caffeinated or Decaf?*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_decaf_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle decaf selection callback."""
+    query = update.callback_query
+    await query.answer()
+
+    pending_order = context.user_data.get("pending_order")
+    if not pending_order:
+        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        return
+
+    # Parse: customize:decaf:{value}
+    decaf = query.data.split(":")[2]
+    pending_order["decaf"] = decaf
+
+    # Next step: temperature (if options exist) or syrup
+    if pending_order.get("temperature_options"):
+        await show_temperature_selection(query, context)
+    elif pending_order.get("syrup_options"):
+        await show_syrup_selection(query, context)
+    else:
+        await show_order_details(query, context)
+
+
+async def show_temperature_selection(query, context):
+    """Show temperature selection (if available for the drink)."""
+    pending_order = context.user_data.get("pending_order")
+    if not pending_order:
+        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        return
+
+    temperature_options = pending_order.get("temperature_options", [])
+    if not temperature_options:
+        # Skip to next step
+        if pending_order.get("syrup_options"):
+            await show_syrup_selection(query, context)
+        else:
+            await show_order_details(query, context)
+        return
+
+    section = pending_order.get("section", "general")
+    step_num = "3" if section == "sisters" else "2"
+
+    # Build keyboard with temperature options
+    keyboard = []
+    row = []
+    for i, temp in enumerate(temperature_options):
+        emoji = "🔥" if "hot" in temp.lower() else "🧊" if "ice" in temp.lower() or "cold" in temp.lower() else "🥤"
+        row.append(InlineKeyboardButton(f"{emoji} {temp}", callback_data=f"customize:temp:{temp}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")])
+
+    # Show current selections
+    selections = []
+    if pending_order.get("shots"):
+        selections.append(f"☕ Shots: {pending_order['shots']}")
+    if pending_order.get("decaf"):
+        selections.append(f"🌙 Type: {pending_order['decaf']}")
+
+    selections_text = "\n".join(selections) if selections else ""
+    if selections_text:
+        selections_text = f"\n\n📋 *Your Selections:*\n{selections_text}"
+
+    await query.edit_message_text(
+        f"☕ *Customize Your Order*\n\n"
+        f"*Item:* {pending_order['item']}\n"
+        f"💰 *Price:* ${pending_order['price']:.2f}"
+        f"{selections_text}\n\n"
+        f"*Step {step_num}: Temperature*\n\n"
+        f"How would you like your drink?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_temperature_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle temperature selection callback."""
+    query = update.callback_query
+    await query.answer()
+
+    pending_order = context.user_data.get("pending_order")
+    if not pending_order:
+        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        return
+
+    # Parse: customize:temp:{value}
+    temperature = query.data.split(":")[2]
+    pending_order["temperature"] = temperature
+
+    # Next step: syrup (if options exist) or order details
+    if pending_order.get("syrup_options"):
+        await show_syrup_selection(query, context)
+    else:
+        await show_order_details(query, context)
+
+
+async def show_syrup_selection(query, context):
+    """Show syrup selection (if available for the drink)."""
+    pending_order = context.user_data.get("pending_order")
+    if not pending_order:
+        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        return
+
+    syrup_options = pending_order.get("syrup_options", [])
+    if not syrup_options:
+        await show_order_details(query, context)
+        return
+
+    section = pending_order.get("section", "general")
+    has_temp = bool(pending_order.get("temperature_options"))
+    step_num = "4" if section == "sisters" else ("3" if has_temp else "2")
+
+    # Build keyboard with syrup options (including "No Syrup")
+    keyboard = []
+    row = []
+    for i, syrup in enumerate(syrup_options):
+        row.append(InlineKeyboardButton(f"🍯 {syrup}", callback_data=f"customize:syrup:{syrup}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("⏭️ No Syrup", callback_data="customize:syrup:None")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")])
+
+    # Show current selections
+    selections = []
+    if pending_order.get("shots"):
+        selections.append(f"☕ Shots: {pending_order['shots']}")
+    if pending_order.get("decaf"):
+        selections.append(f"🌙 Type: {pending_order['decaf']}")
+    if pending_order.get("temperature"):
+        selections.append(f"🌡️ Temp: {pending_order['temperature']}")
+
+    selections_text = "\n".join(selections) if selections else ""
+    if selections_text:
+        selections_text = f"\n\n📋 *Your Selections:*\n{selections_text}"
+
+    await query.edit_message_text(
+        f"☕ *Customize Your Order*\n\n"
+        f"*Item:* {pending_order['item']}\n"
+        f"💰 *Price:* ${pending_order['price']:.2f}"
+        f"{selections_text}\n\n"
+        f"*Step {step_num}: Syrup Flavor*\n\n"
+        f"Would you like to add a syrup?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_syrup_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle syrup selection callback."""
+    query = update.callback_query
+    await query.answer()
+
+    pending_order = context.user_data.get("pending_order")
+    if not pending_order:
+        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        return
+
+    # Parse: customize:syrup:{value}
+    syrup = query.data.split(":")[2]
+    if syrup != "None":
+        pending_order["syrup"] = syrup
+    else:
+        pending_order["syrup"] = ""
+
+    # Final step: show order details
+    await show_order_details(query, context)
+
+
+async def show_order_details(query, context):
+    """Show the order details with all customizations before confirmation."""
+    pending_order = context.user_data.get("pending_order")
+    if not pending_order:
+        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        return
+
+    section = pending_order.get("section", "general")
+    workflow = get_workflow(section)
+
+    # Build customizations summary
+    order_data = OrderData.from_dict(pending_order)
+    customizations = order_data.get_customizations_summary()
+
+    # Build item details
+    if workflow:
+        item_details = workflow.build_order_details(order_data)
+    else:
+        item_details = f"*{pending_order['item']}*\n💰 *Price:* ${pending_order['price']:.2f}"
+
+    # Add customizations to display
+    if customizations:
+        item_details += f"\n\n☕ *Customizations:* {customizations}"
 
     # Buttons for order flow
     keyboard = [
@@ -410,9 +674,9 @@ async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TY
     ]
 
     await query.edit_message_text(
-        f"🛒 *Order Details*\n\n"
+        f"🛒 *Order Summary*\n\n"
         f"{item_details}\n\n"
-        f"Would you like to add special instructions (e.g., decaf, extra syrup)?",
+        f"Would you like to add any additional special instructions?",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
@@ -522,23 +786,26 @@ async def handle_special_instructions_text(
 
 
 async def show_final_confirmation(query, context, pending_order):
-    """Show final confirmation screen with all order details."""
+    """Show final confirmation screen with all order details.
+
+    Uses the workflow system for section-specific formatting.
+    """
     section = pending_order.get("section", "general")
-    if section == "sisters":
-        pickup_note = "🧕 _Pickup: Kitchen area (sisters section)_"
-    elif section == "brothers":
-        pickup_note = "🧔 _Pickup: Upstairs kitchen area (brothers section)_"
+    workflow = get_workflow(section)
+
+    order_data = OrderData.from_dict(pending_order)
+
+    if workflow:
+        # Use workflow for section-specific formatting
+        item_details = workflow.build_order_details(order_data)
     else:
-        pickup_note = ""
+        # Fallback for general items
+        description = pending_order.get("description", "")
+        item_details = f"*{pending_order['item']}*\n💰 *Price:* ${pending_order['price']:.2f}"
+        if description:
+            item_details += f"\n📝 _{description}_"
 
-    description = pending_order.get("description", "")
     notes = pending_order.get("notes", "")
-
-    item_details = f"*{pending_order['item']}*\n💰 *Price:* ${pending_order['price']:.2f}"
-    if description:
-        item_details += f"\n📝 _{description}_"
-    if pickup_note:
-        item_details += f"\n\n{pickup_note}"
 
     keyboard = [
         [
@@ -563,7 +830,11 @@ async def show_final_confirmation(query, context, pending_order):
 
 
 async def handle_order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle order confirmation (YES/NO)."""
+    """Handle order confirmation (YES/NO).
+
+    Uses the workflow system for section-specific order creation and messaging.
+    Includes drink customizations in the order notes.
+    """
     query = update.callback_query
     await query.answer()
 
@@ -582,53 +853,55 @@ async def handle_order_confirmation(update: Update, context: ContextTypes.DEFAUL
             )
             return
 
-        # Use section (from button clicked) for gender/pickup determination
+        # Get the workflow for this section
         section = pending_order.get("section", "general")
-        notes = pending_order.get("notes", "")
+        workflow = get_workflow(section)
+        order_data = OrderData.from_dict(pending_order)
 
-        # Create the order in Google Sheets
-        order_id = create_order(
-            telegram_id=user.id,
-            telegram_name=user.full_name,
-            item=pending_order["item"],
-            price=pending_order["price"],
-            gender=section,  # Store section as gender for pickup routing
-            notes=notes,
-        )
+        # Build full notes including customizations
+        full_notes = order_data.build_full_notes()
+        # Update the order_data notes for confirmation message
+        order_data.notes = full_notes
+
+        # Create the order using workflow (allows section-specific creation)
+        if workflow:
+            order_id = await workflow.create_order(
+                telegram_id=user.id,
+                telegram_name=user.full_name,
+                order_data=order_data,
+            )
+        else:
+            # Fallback: direct order creation
+            order_id = create_order(
+                telegram_id=user.id,
+                telegram_name=user.full_name,
+                item=pending_order["item"],
+                price=pending_order["price"],
+                gender=section,
+                notes=full_notes,
+            )
 
         if order_id:
             logger.info(
-                f"Order {order_id} created for user {user.id}: {pending_order['item']}"
+                f"Order {order_id} created for user {user.id}: {pending_order['item']} "
+                f"(customizations: {order_data.get_customizations_summary() or 'none'})"
             )
 
-            # Determine pickup location based on section clicked
-            if section == "sisters":
-                pickup_location = "🧕 *Pickup Location:* Kitchen area (sisters section)"
-            elif section == "brothers":
-                pickup_location = (
-                    "🧔 *Pickup Location:* Upstairs kitchen area (brothers section)"
-                )
+            # Build confirmation message using workflow
+            if workflow:
+                confirmation_msg = workflow.build_confirmation_message(order_data, order_id)
             else:
-                pickup_location = "📍 *Pickup Location:* Cafe counter"
-
-            # Build confirmation message
-            confirmation_msg = (
-                f"✅ *Order Placed!*\n\n"
-                f"Your order for *{pending_order['item']}* has been enqueued.\n\n"
-                f"{pickup_location}\n\n"
-            )
-            if notes:
-                confirmation_msg += f"📋 *Special Instructions:* _{notes}_\n\n"
-            confirmation_msg += (
-                f"📩 You will receive a DM once your order is ready, In Shaa Allah.\n\n"
-                f"Order ID: `{order_id}`\n\n"
-                f"🤲 *JazakAllah Khair!* Your contribution supports our masjid. "
-                f"May Allah bless you and your family!"
-            )
+                # Fallback confirmation
+                confirmation_msg = (
+                    f"✅ *Order Placed!*\n\n"
+                    f"Your order for *{pending_order['item']}* has been enqueued.\n\n"
+                    f"Order ID: `{order_id}`\n\n"
+                    f"🤲 *JazakAllah Khair!*"
+                )
 
             await query.edit_message_text(confirmation_msg, parse_mode="Markdown")
 
-            # Notify staff in registered chats
+            # Notify staff in registered chats (include customizations in notes)
             await notify_staff_of_order(
                 bot=context.bot,
                 order_id=order_id,
@@ -636,9 +909,8 @@ async def handle_order_confirmation(update: Update, context: ContextTypes.DEFAUL
                 telegram_name=user.full_name,
                 item=pending_order["item"],
                 price=pending_order["price"],
-                gender=section,  # Use section for routing to correct topic
-                description=pending_order.get("description", ""),
-                notes=notes,
+                gender=section,
+                notes=full_notes,
             )
         else:
             logger.error(f"Failed to create order for user {user.id}")
@@ -1191,7 +1463,6 @@ async def notify_staff_of_order(
     item: str,
     price: float,
     gender: str,
-    description: str = "",
     notes: str = "",
 ):
     """Notify registered chats about a new order."""
@@ -1222,24 +1493,27 @@ async def notify_staff_of_order(
         f"📋 *Order ID:* `{order_id}`\n"
         f"👤 *Customer:* {telegram_name}\n"
         f"🍽️ *Item:* {item}\n"
+        f"💰 *Price:* ${price:.2f}\n"
     )
-    if description:
-        message += f"📝 _{description}_\n"
-    message += f"💰 *Price:* ${price:.2f}\n"
     if notes:
         message += f"\n⚠️ *Special Instructions:* _{notes}_\n"
     message += "\n_Please prepare this order, In Shaa Allah._"
 
-    # Buttons for staff to complete or deny order
+    # Buttons for staff to mark order status
     keyboard = [
         [
             InlineKeyboardButton(
-                "✅ Complete Order", callback_data=f"complete:{order_id}:{telegram_id}"
+                "🔄 In Progress", callback_data=f"inprogress:{order_id}:{telegram_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "✅ Ready", callback_data=f"ready:{order_id}:{telegram_id}"
             ),
             InlineKeyboardButton(
-                "❌ Deny Order", callback_data=f"deny:{order_id}:{telegram_id}"
+                "❌ Deny", callback_data=f"deny:{order_id}:{telegram_id}"
             ),
-        ]
+        ],
     ]
 
     for chat in registered_chats:
@@ -1303,6 +1577,51 @@ async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def handle_in_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle marking an order as in progress (being prepared)."""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split(":")
+    order_id = parts[1]
+    customer_telegram_id = int(parts[2])
+
+    # Get the original message to extract order details
+    original_message = query.message.text if query.message else ""
+
+    # Update the message to show in progress status
+    # Keep the Ready and Deny buttons, remove In Progress button
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ Ready", callback_data=f"ready:{order_id}:{customer_telegram_id}"
+            ),
+            InlineKeyboardButton(
+                "❌ Deny", callback_data=f"deny:{order_id}:{customer_telegram_id}"
+            ),
+        ],
+    ]
+
+    # Extract item info from original message if possible
+    item_line = ""
+    for line in original_message.split("\n"):
+        if "Item:" in line:
+            item_line = line
+            break
+
+    await query.edit_message_text(
+        f"🔄 *ORDER IN PROGRESS*\n\n"
+        f"📋 *Order ID:* `{order_id}`\n"
+        f"{item_line}\n\n"
+        f"⏳ _This order is being prepared..._\n\n"
+        f"Mark as ready when complete, or deny if needed.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+    logger.info(f"Order {order_id} marked as in progress by staff")
+
+
 async def handle_order_ready(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle marking an order as ready."""
     query = update.callback_query
@@ -1335,19 +1654,29 @@ async def handle_order_ready(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"Order {order_id} has unrecognized gender '{gender}', using default pickup"
             )
 
-        # Build notification message
-        message = (
-            f"🎉 *Alhamdulillah, your order is ready!*\n\n"
-            f"🍽️ *Item:* {item}\n"
-            f"📋 *Order ID:* `{order_id}`\n\n"
-            f"{pickup_location}\n"
-        )
-        if notes:
-            message += f"\n📝 *Your Instructions:* _{notes}_\n"
-        message += (
-            f"\n🤲 JazakAllah Khair for supporting our masjid!\n"
-            f"May Allah accept your contribution and bless you!"
-        )
+        # Get workflow for this section (if available)
+        workflow = get_workflow(gender) if gender else None
+
+        # Build notification message using workflow or fallback
+        if workflow:
+            message = workflow.build_ready_message({
+                "item": item,
+                "order_id": order_id,
+                "notes": notes,
+            })
+        else:
+            message = (
+                f"🎉 *Alhamdulillah, your order is ready!*\n\n"
+                f"🍽️ *Item:* {item}\n"
+                f"📋 *Order ID:* `{order_id}`\n\n"
+                f"{pickup_location}\n"
+            )
+            if notes:
+                message += f"\n📝 *Your Instructions:* _{notes}_\n"
+            message += (
+                f"\n🤲 JazakAllah Khair for supporting our masjid!\n"
+                f"May Allah accept your contribution and bless you!"
+            )
 
         # Notify customer
         try:
@@ -1407,6 +1736,9 @@ async def handle_order_complete(update: Update, context: ContextTypes.DEFAULT_TY
             logger.warning(f"Order {order_id} has unexpected gender value: '{gender}'")
             pickup_location = "📍 *Pickup Location:* Cafe counter"
 
+        # Get customer name for staff message
+        customer_name = result.get("telegram_name", "Unknown")
+
         # Notify customer
         try:
             await context.bot.send_message(
@@ -1423,7 +1755,8 @@ async def handle_order_complete(update: Update, context: ContextTypes.DEFAULT_TY
             )
             await query.edit_message_text(
                 f"✅ *Order Completed!*\n\n"
-                f"Order `{order_id}` has been marked as complete.\n"
+                f"👤 *Customer:* {customer_name}\n"
+                f"📋 *Order ID:* `{order_id}`\n\n"
                 f"Customer has been notified.\n\n"
                 f"_JazakAllah Khair!_",
                 parse_mode="Markdown",
@@ -1431,7 +1764,7 @@ async def handle_order_complete(update: Update, context: ContextTypes.DEFAULT_TY
         except (BadRequest, Forbidden) as e:
             logger.warning(f"Could not notify user {customer_telegram_id}: {e}")
             await query.edit_message_text(
-                f"✅ Order `{order_id}` marked as complete.\n"
+                f"✅ Order completed for *{customer_name}* (`{order_id}`)\n"
                 f"⚠️ Could not notify customer (they may have blocked the bot).",
                 parse_mode="Markdown",
             )
@@ -1463,6 +1796,9 @@ async def handle_order_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # Get customer name for staff message
+        customer_name = result.get("telegram_name", "Unknown")
+
         # Notify customer
         try:
             await context.bot.send_message(
@@ -1481,7 +1817,8 @@ async def handle_order_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await query.edit_message_text(
                 f"❌ *Order Denied*\n\n"
-                f"Order `{order_id}` has been denied.\n"
+                f"👤 *Customer:* {customer_name}\n"
+                f"📋 *Order ID:* `{order_id}`\n\n"
                 f"Customer has been notified.\n\n"
                 f"_May Allah make it easy._",
                 parse_mode="Markdown",
@@ -1489,7 +1826,7 @@ async def handle_order_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (BadRequest, Forbidden) as e:
             logger.warning(f"Could not notify user {customer_telegram_id}: {e}")
             await query.edit_message_text(
-                f"❌ Order `{order_id}` denied.\n"
+                f"❌ Order denied for *{customer_name}* (`{order_id}`)\n"
                 f"⚠️ Could not notify customer (they may have blocked the bot).",
                 parse_mode="Markdown",
             )
@@ -1612,6 +1949,19 @@ def main():
     )
     app.add_handler(CallbackQueryHandler(handle_header_click, pattern=r"^header:"))
     app.add_handler(CallbackQueryHandler(handle_menu_selection, pattern=r"^menu:"))
+    # Drink customization handlers
+    app.add_handler(
+        CallbackQueryHandler(handle_shots_selection, pattern=r"^customize:shots:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(handle_decaf_selection, pattern=r"^customize:decaf:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(handle_temperature_selection, pattern=r"^customize:temp:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(handle_syrup_selection, pattern=r"^customize:syrup:")
+    )
     app.add_handler(
         CallbackQueryHandler(handle_instructions_add, pattern=r"^instructions:add$")
     )
@@ -1622,6 +1972,7 @@ def main():
         CallbackQueryHandler(handle_order_confirmation, pattern=r"^confirm:")
     )
     app.add_handler(CallbackQueryHandler(handle_order_ready, pattern=r"^ready:"))
+    app.add_handler(CallbackQueryHandler(handle_in_progress, pattern=r"^inprogress:"))
     app.add_handler(CallbackQueryHandler(handle_order_complete, pattern=r"^complete:"))
     app.add_handler(CallbackQueryHandler(handle_order_deny, pattern=r"^deny:"))
 

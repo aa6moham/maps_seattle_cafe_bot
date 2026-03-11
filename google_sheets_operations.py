@@ -158,9 +158,9 @@ def is_admin(telegram_id: int) -> bool:
             if isinstance(admin_id_raw, str):
                 admin_id_raw = admin_id_raw.strip()
             admin_id = int(admin_id_raw)
-            
+
             logger.debug(f"Comparing {telegram_id} with admin {admin_id}")
-            
+
             if admin_id == telegram_id:
                 logger.info(f"User {telegram_id} is an admin")
                 set_cached(cache_key, True, ttl=300)
@@ -524,7 +524,9 @@ def close_cafe(brothers: bool = True, sisters: bool = True) -> dict[str, bool]:
 def get_menu_items() -> list[dict]:
     """Get all available menu items from the 'menu' sheet.
 
-    Sheet schema: item, price, gender, description
+    Sheet schema: item, price, gender, description, temperature, syrup
+    - temperature: semicolon-separated options (e.g., "Hot;Iced;Blended"), "N/A" if not applicable
+    - syrup: semicolon-separated options (e.g., "Vanilla;Caramel;Hazelnut"), "N/A" if not applicable
 
     Returns:
         List of menu item dictionaries.
@@ -553,12 +555,28 @@ def get_menu_items() -> list[dict]:
         except (ValueError, TypeError):
             price = 0.0
 
+        # Parse temperature options (semicolon-separated, "N/A" means none)
+        temp_raw = str(item.get("temperature", "")).strip()
+        if temp_raw.upper() == "N/A" or not temp_raw:
+            temperature_options = []
+        else:
+            temperature_options = [t.strip() for t in temp_raw.split(";") if t.strip()]
+
+        # Parse syrup options (semicolon-separated, "N/A" means none)
+        syrup_raw = str(item.get("syrup", "")).strip()
+        if syrup_raw.upper() == "N/A" or not syrup_raw:
+            syrup_options = []
+        else:
+            syrup_options = [s.strip() for s in syrup_raw.split(";") if s.strip()]
+
         menu_items.append({
             "item_id": str(idx + 1),  # Simple ID based on row
             "item": str(item.get("item", "")).strip(),
             "price": price,
             "gender": str(item.get("gender", "")).strip(),
             "description": str(item.get("description", "")).strip(),
+            "temperature_options": temperature_options,
+            "syrup_options": syrup_options,
         })
 
     # Filter out empty items
