@@ -524,9 +524,11 @@ def close_cafe(brothers: bool = True, sisters: bool = True) -> dict[str, bool]:
 def get_menu_items() -> list[dict]:
     """Get all available menu items from the 'menu' sheet.
 
-    Sheet schema: item, price, gender, description, temperature, syrup
+    Sheet schema: item, price, gender, description, temperature, syrup, caffeine_option, num_shots
     - temperature: semicolon-separated options (e.g., "Hot;Iced;Blended"), "N/A" if not applicable
     - syrup: semicolon-separated options (e.g., "Vanilla;Caramel;Hazelnut"), "N/A" if not applicable
+    - caffeine_option: semicolon-separated options (e.g., "Caffeinated;Decaf"), "N/A" if not applicable
+    - num_shots: semicolon-separated options (e.g., "1;2;3;4"), "N/A" if not applicable
 
     Returns:
         List of menu item dictionaries.
@@ -569,6 +571,20 @@ def get_menu_items() -> list[dict]:
         else:
             syrup_options = [s.strip() for s in syrup_raw.split(";") if s.strip()]
 
+        # Parse caffeine options (semicolon-separated, "N/A" means none)
+        caffeine_raw = str(item.get("caffeine_option", "")).strip()
+        if caffeine_raw.upper() == "N/A" or not caffeine_raw:
+            caffeine_options = []
+        else:
+            caffeine_options = [c.strip() for c in caffeine_raw.split(";") if c.strip()]
+
+        # Parse num_shots options (semicolon-separated, "N/A" means none)
+        shots_raw = str(item.get("num_shots", "")).strip()
+        if shots_raw.upper() == "N/A" or not shots_raw:
+            shots_options = []
+        else:
+            shots_options = [s.strip() for s in shots_raw.split(";") if s.strip()]
+
         menu_items.append({
             "item_id": str(idx + 1),  # Simple ID based on row
             "item": str(item.get("item", "")).strip(),
@@ -577,6 +593,8 @@ def get_menu_items() -> list[dict]:
             "description": str(item.get("description", "")).strip(),
             "temperature_options": temperature_options,
             "syrup_options": syrup_options,
+            "caffeine_options": caffeine_options,
+            "shots_options": shots_options,
         })
 
     # Filter out empty items

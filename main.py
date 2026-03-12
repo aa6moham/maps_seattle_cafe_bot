@@ -350,6 +350,8 @@ async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TY
     description = item.get("description", "")
     temperature_options = item.get("temperature_options", [])
     syrup_options = item.get("syrup_options", [])
+    caffeine_options = item.get("caffeine_options", [])
+    shots_options = item.get("shots_options", [])
 
     # Store selection in user context for confirmation
     context.user_data["pending_order"] = {
@@ -365,16 +367,24 @@ async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TY
         "syrup": "",
         "temperature_options": temperature_options,
         "syrup_options": syrup_options,
+        "caffeine_options": caffeine_options,
+        "shots_options": shots_options,
     }
     # Clear any waiting state
     context.user_data.pop("awaiting_instructions", None)
 
-    # Start the customization flow based on section
-    # Sisters get shots selection first, brothers skip to decaf
-    if section == "sisters":
+    # Start the customization flow based on available options
+    # Order: shots -> caffeine -> temperature -> syrup -> order details
+    if shots_options:
         await show_shots_selection(query, context)
-    else:
+    elif caffeine_options:
         await show_decaf_selection(query, context)
+    elif temperature_options:
+        await show_temperature_selection(query, context)
+    elif syrup_options:
+        await show_syrup_selection(query, context)
+    else:
+        await show_order_details(query, context)
 
 
 # ============================================================================
@@ -383,7 +393,7 @@ async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def show_shots_selection(query, context):
-    """Show shots selection (Sisters only)."""
+    """Show shots selection based on menu options."""
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
         await query.edit_message_text(
@@ -391,17 +401,32 @@ async def show_shots_selection(query, context):
         )
         return
 
-    keyboard = [
-        [
-            InlineKeyboardButton("1 Shot", callback_data="customize:shots:1"),
-            InlineKeyboardButton("2 Shots", callback_data="customize:shots:2"),
-        ],
-        [
-            InlineKeyboardButton("3 Shots", callback_data="customize:shots:3"),
-            InlineKeyboardButton("4 Shots", callback_data="customize:shots:4"),
-        ],
-        [InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")],
-    ]
+    shots_options = pending_order.get("shots_options", [])
+    if not shots_options:
+        # No shots options, skip to next step
+        caffeine_options = pending_order.get("caffeine_options", [])
+        if caffeine_options:
+            await show_decaf_selection(query, context)
+        elif pending_order.get("temperature_options"):
+            await show_temperature_selection(query, context)
+        elif pending_order.get("syrup_options"):
+            await show_syrup_selection(query, context)
+        else:
+            await show_order_details(query, context)
+        return
+
+    # Build keyboard from dynamic options
+    buttons = []
+    row = []
+    for shot in shots_options:
+        label = f"{shot} Shot" if shot == "1" else f"{shot} Shots"
+        row.append(InlineKeyboardButton(label, callback_data=f"customize:shots:{shot}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")])
 
     await query.edit_message_text(
         f"☕ *Customize Your Order*\n\n"
@@ -409,7 +434,7 @@ async def show_shots_selection(query, context):
         f"💰 *Price:* ${pending_order['price']:.2f}\n\n"
         f"*Step 1: Number of Espresso Shots*\n\n"
         f"How many shots would you like?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown",
     )
 
@@ -430,12 +455,20 @@ async def handle_shots_selection(update: Update, context: ContextTypes.DEFAULT_T
     shots = query.data.split(":")[2]
     pending_order["shots"] = shots
 
-    # Next step: decaf selection
-    await show_decaf_selection(query, context)
+    # Next step: caffeine selection (if available), then temperature, then syrup
+    caffeine_options = pending_order.get("caffeine_options", [])
+    if caffeine_options:
+        await show_decaf_selection(query, context)
+    elif pending_order.get("temperature_options"):
+        await show_temperature_selection(query, context)
+    elif pending_order.get("syrup_options"):
+        await show_syrup_selection(query, context)
+    else:
+        await show_order_details(query, context)
 
 
 async def show_decaf_selection(query, context):
-    """Show decaf/caffeinated selection (Both sections)."""
+    """Show caffeine selection based on menu options."""
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
         await query.edit_message_text(
@@ -443,18 +476,40 @@ async def show_decaf_selection(query, context):
         )
         return
 
-    section = pending_order.get("section", "general")
-    step_num = "2" if section == "sisters" else "1"
+    caffeine_options = pending_order.get("caffeine_options", [])
+    if not caffeine_options:
+        # No caffeine options, skip to next step
+        if pending_order.get("temperature_options"):
+            await show_temperature_selection(query, context)
+        elif pending_order.get("syrup_options"):
+            await show_syrup_selection(query, context)
+        else:
+            await show_order_details(query, context)
+        return
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "☕ Caffeinated", callback_data="customize:decaf:Caffeinated"
-            ),
-            InlineKeyboardButton("🌙 Decaf", callback_data="customize:decaf:Decaf"),
-        ],
-        [InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")],
-    ]
+    # Calculate step number based on what options are available
+    step_num = 1
+    if pending_order.get("shots_options") and pending_order.get("shots"):
+        step_num += 1
+
+    # Build keyboard from dynamic options
+    buttons = []
+    row = []
+    for option in caffeine_options:
+        # Add appropriate emoji
+        if option.lower() == "decaf":
+            label = f"🌙 {option}"
+        elif option.lower() == "caffeinated":
+            label = f"☕ {option}"
+        else:
+            label = option
+        row.append(InlineKeyboardButton(label, callback_data=f"customize:decaf:{option}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")])
 
     # Show current selections
     selections = []
@@ -471,7 +526,7 @@ async def show_decaf_selection(query, context):
         f"💰 *Price:* ${pending_order['price']:.2f}"
         f"{selections_text}\n\n"
         f"*Step {step_num}: Caffeinated or Decaf?*",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown",
     )
 
@@ -519,8 +574,12 @@ async def show_temperature_selection(query, context):
             await show_order_details(query, context)
         return
 
-    section = pending_order.get("section", "general")
-    step_num = "3" if section == "sisters" else "2"
+    # Calculate step number dynamically based on previous selections
+    step_num = 1
+    if pending_order.get("shots_options") and pending_order.get("shots"):
+        step_num += 1
+    if pending_order.get("caffeine_options") and pending_order.get("decaf"):
+        step_num += 1
 
     # Build keyboard with temperature options
     keyboard = []
@@ -607,9 +666,14 @@ async def show_syrup_selection(query, context):
         await show_order_details(query, context)
         return
 
-    section = pending_order.get("section", "general")
-    has_temp = bool(pending_order.get("temperature_options"))
-    step_num = "4" if section == "sisters" else ("3" if has_temp else "2")
+    # Calculate step number dynamically based on previous selections
+    step_num = 1
+    if pending_order.get("shots_options") and pending_order.get("shots"):
+        step_num += 1
+    if pending_order.get("caffeine_options") and pending_order.get("decaf"):
+        step_num += 1
+    if pending_order.get("temperature_options") and pending_order.get("temperature"):
+        step_num += 1
 
     # Build keyboard with syrup options (including "No Syrup")
     keyboard = []

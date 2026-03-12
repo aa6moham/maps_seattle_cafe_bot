@@ -47,19 +47,25 @@ class OrderData:
     description: str = ""
     notes: str = ""
     # Drink customizations
-    shots: str = ""  # Number of shots (sisters only)
-    decaf: str = ""  # "Decaf" or "Caffeinated" or ""
+    shots: str = ""  # Number of shots (from menu num_shots column)
+    decaf: str = ""  # Caffeine option (from menu caffeine_option column)
     temperature: str = ""  # Selected temperature option
     syrup: str = ""  # Selected syrup option
     # Available options from menu (for validation)
     temperature_options: list = None
     syrup_options: list = None
+    caffeine_options: list = None
+    shots_options: list = None
 
     def __post_init__(self):
         if self.temperature_options is None:
             self.temperature_options = []
         if self.syrup_options is None:
             self.syrup_options = []
+        if self.caffeine_options is None:
+            self.caffeine_options = []
+        if self.shots_options is None:
+            self.shots_options = []
 
     def to_dict(self) -> dict:
         """Convert to dictionary for storage in user_data."""
@@ -76,6 +82,8 @@ class OrderData:
             "syrup": self.syrup,
             "temperature_options": self.temperature_options,
             "syrup_options": self.syrup_options,
+            "caffeine_options": self.caffeine_options,
+            "shots_options": self.shots_options,
         }
 
     @classmethod
@@ -94,6 +102,8 @@ class OrderData:
             syrup=data.get("syrup", ""),
             temperature_options=data.get("temperature_options", []),
             syrup_options=data.get("syrup_options", []),
+            caffeine_options=data.get("caffeine_options", []),
+            shots_options=data.get("shots_options", []),
         )
 
     def get_customizations_summary(self) -> str:
