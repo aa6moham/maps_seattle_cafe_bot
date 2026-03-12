@@ -28,10 +28,10 @@ from google_sheets_operations import (
 )
 from logger import setup_logger
 from order_workflows import (
-    OrderData,
-    get_workflow,
     get_brothers_workflow,
     get_sisters_workflow,
+    get_workflow,
+    OrderData,
 )
 from private.constants import BOT_TOKEN, BOT_USERNAME
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -41,8 +41,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
     filters,
+    MessageHandler,
 )
 
 # Setup logging
@@ -109,8 +109,12 @@ async def mystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Separate pending/ready orders from completed/denied
-    active_orders = [o for o in user_orders if o.get("status", "").lower() in ("pending", "ready")]
-    recent_completed = [o for o in user_orders if o.get("status", "").lower() in ("completed", "denied")][:5]
+    active_orders = [
+        o for o in user_orders if o.get("status", "").lower() in ("pending", "ready")
+    ]
+    recent_completed = [
+        o for o in user_orders if o.get("status", "").lower() in ("completed", "denied")
+    ][:5]
 
     # Build message
     message_parts = ["📋 *Your Orders*\n"]
@@ -125,7 +129,9 @@ async def mystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             order_id = order.get("order_id", "N/A")
             notes = order.get("notes", "")
 
-            order_text = f"\n{status_emoji} *{item}* (#{order_id})\n   Status: {status_text}"
+            order_text = (
+                f"\n{status_emoji} *{item}* (#{order_id})\n   Status: {status_text}"
+            )
             if notes:
                 order_text += f"\n   Notes: _{notes}_"
             message_parts.append(order_text)
@@ -161,7 +167,9 @@ async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Check if user already has a pending order (rate limiting)
     user_orders = get_orders_for_user(user.id)
-    pending_orders = [o for o in user_orders if o.get("status", "").lower() == "pending"]
+    pending_orders = [
+        o for o in user_orders if o.get("status", "").lower() == "pending"
+    ]
 
     if pending_orders:
         pending_order = pending_orders[0]
@@ -237,9 +245,7 @@ async def handle_gender_selection(update: Update, context: ContextTypes.DEFAULT_
     # Get the workflow for this section
     workflow = get_workflow(section)
     if not workflow:
-        await query.edit_message_text(
-            "❌ Invalid section. Please try /order again."
-        )
+        await query.edit_message_text("❌ Invalid section. Please try /order again.")
         return
 
     # Store the selected section/gender
@@ -380,7 +386,9 @@ async def show_shots_selection(query, context):
     """Show shots selection (Sisters only)."""
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     keyboard = [
@@ -413,7 +421,9 @@ async def handle_shots_selection(update: Update, context: ContextTypes.DEFAULT_T
 
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     # Parse: customize:shots:{value}
@@ -428,7 +438,9 @@ async def show_decaf_selection(query, context):
     """Show decaf/caffeinated selection (Both sections)."""
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     section = pending_order.get("section", "general")
@@ -436,7 +448,9 @@ async def show_decaf_selection(query, context):
 
     keyboard = [
         [
-            InlineKeyboardButton("☕ Caffeinated", callback_data="customize:decaf:Caffeinated"),
+            InlineKeyboardButton(
+                "☕ Caffeinated", callback_data="customize:decaf:Caffeinated"
+            ),
             InlineKeyboardButton("🌙 Decaf", callback_data="customize:decaf:Decaf"),
         ],
         [InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")],
@@ -469,7 +483,9 @@ async def handle_decaf_selection(update: Update, context: ContextTypes.DEFAULT_T
 
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     # Parse: customize:decaf:{value}
@@ -489,7 +505,9 @@ async def show_temperature_selection(query, context):
     """Show temperature selection (if available for the drink)."""
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     temperature_options = pending_order.get("temperature_options", [])
@@ -508,14 +526,24 @@ async def show_temperature_selection(query, context):
     keyboard = []
     row = []
     for i, temp in enumerate(temperature_options):
-        emoji = "🔥" if "hot" in temp.lower() else "🧊" if "ice" in temp.lower() or "cold" in temp.lower() else "🥤"
-        row.append(InlineKeyboardButton(f"{emoji} {temp}", callback_data=f"customize:temp:{temp}"))
+        emoji = (
+            "🔥"
+            if "hot" in temp.lower()
+            else "🧊" if "ice" in temp.lower() or "cold" in temp.lower() else "🥤"
+        )
+        row.append(
+            InlineKeyboardButton(
+                f"{emoji} {temp}", callback_data=f"customize:temp:{temp}"
+            )
+        )
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")])
+    keyboard.append(
+        [InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")]
+    )
 
     # Show current selections
     selections = []
@@ -540,14 +568,18 @@ async def show_temperature_selection(query, context):
     )
 
 
-async def handle_temperature_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_temperature_selection(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
     """Handle temperature selection callback."""
     query = update.callback_query
     await query.answer()
 
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     # Parse: customize:temp:{value}
@@ -565,7 +597,9 @@ async def show_syrup_selection(query, context):
     """Show syrup selection (if available for the drink)."""
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     syrup_options = pending_order.get("syrup_options", [])
@@ -581,14 +615,22 @@ async def show_syrup_selection(query, context):
     keyboard = []
     row = []
     for i, syrup in enumerate(syrup_options):
-        row.append(InlineKeyboardButton(f"🍯 {syrup}", callback_data=f"customize:syrup:{syrup}"))
+        row.append(
+            InlineKeyboardButton(
+                f"🍯 {syrup}", callback_data=f"customize:syrup:{syrup}"
+            )
+        )
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("⏭️ No Syrup", callback_data="customize:syrup:None")])
-    keyboard.append([InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")])
+    keyboard.append(
+        [InlineKeyboardButton("⏭️ No Syrup", callback_data="customize:syrup:None")]
+    )
+    keyboard.append(
+        [InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")]
+    )
 
     # Show current selections
     selections = []
@@ -622,7 +664,9 @@ async def handle_syrup_selection(update: Update, context: ContextTypes.DEFAULT_T
 
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     # Parse: customize:syrup:{value}
@@ -640,7 +684,9 @@ async def show_order_details(query, context):
     """Show the order details with all customizations before confirmation."""
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     section = pending_order.get("section", "general")
@@ -654,7 +700,9 @@ async def show_order_details(query, context):
     if workflow:
         item_details = workflow.build_order_details(order_data)
     else:
-        item_details = f"*{pending_order['item']}*\n💰 *Price:* ${pending_order['price']:.2f}"
+        item_details = (
+            f"*{pending_order['item']}*\n💰 *Price:* ${pending_order['price']:.2f}"
+        )
 
     # Add customizations to display
     if customizations:
@@ -689,7 +737,9 @@ async def handle_instructions_add(update: Update, context: ContextTypes.DEFAULT_
 
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     # Set flag to await text input
@@ -697,7 +747,11 @@ async def handle_instructions_add(update: Update, context: ContextTypes.DEFAULT_
 
     # Show current order with instruction prompt
     keyboard = [
-        [InlineKeyboardButton("⏭️ Skip (No Instructions)", callback_data="instructions:skip")],
+        [
+            InlineKeyboardButton(
+                "⏭️ Skip (No Instructions)", callback_data="instructions:skip"
+            )
+        ],
         [InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")],
     ]
 
@@ -705,7 +759,7 @@ async def handle_instructions_add(update: Update, context: ContextTypes.DEFAULT_
         f"📝 *Add Special Instructions*\n\n"
         f"Order: *{pending_order['item']}*\n\n"
         f"Please type your special instructions below:\n"
-        f"_(e.g., \"decaf\", \"extra pump vanilla\", \"oat milk\")_\n\n"
+        f'_(e.g., "decaf", "extra pump vanilla", "oat milk")_\n\n'
         f"Or tap Skip if you don't need any.",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -722,7 +776,9 @@ async def handle_instructions_skip(update: Update, context: ContextTypes.DEFAULT
 
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await query.edit_message_text("❌ Order expired. Please start again with /order.")
+        await query.edit_message_text(
+            "❌ Order expired. Please start again with /order."
+        )
         return
 
     # Show final confirmation
@@ -739,7 +795,9 @@ async def handle_special_instructions_text(
 
     pending_order = context.user_data.get("pending_order")
     if not pending_order:
-        await update.message.reply_text("❌ Order expired. Please start again with /order.")
+        await update.message.reply_text(
+            "❌ Order expired. Please start again with /order."
+        )
         context.user_data.pop("awaiting_instructions", None)
         return
 
@@ -759,7 +817,9 @@ async def handle_special_instructions_text(
         pickup_note = ""
 
     description = pending_order.get("description", "")
-    item_details = f"*{pending_order['item']}*\n💰 *Price:* ${pending_order['price']:.2f}"
+    item_details = (
+        f"*{pending_order['item']}*\n💰 *Price:* ${pending_order['price']:.2f}"
+    )
     if description:
         item_details += f"\n📝 _{description}_"
     if pickup_note:
@@ -770,9 +830,7 @@ async def handle_special_instructions_text(
             InlineKeyboardButton("✅ Confirm Order", callback_data="confirm:yes"),
             InlineKeyboardButton("❌ Cancel", callback_data="confirm:no"),
         ],
-        [
-            InlineKeyboardButton("✏️ Edit Instructions", callback_data="instructions:add")
-        ],
+        [InlineKeyboardButton("✏️ Edit Instructions", callback_data="instructions:add")],
     ]
 
     await update.message.reply_text(
@@ -801,7 +859,9 @@ async def show_final_confirmation(query, context, pending_order):
     else:
         # Fallback for general items
         description = pending_order.get("description", "")
-        item_details = f"*{pending_order['item']}*\n💰 *Price:* ${pending_order['price']:.2f}"
+        item_details = (
+            f"*{pending_order['item']}*\n💰 *Price:* ${pending_order['price']:.2f}"
+        )
         if description:
             item_details += f"\n📝 _{description}_"
 
@@ -812,9 +872,7 @@ async def show_final_confirmation(query, context, pending_order):
             InlineKeyboardButton("✅ Confirm Order", callback_data="confirm:yes"),
             InlineKeyboardButton("❌ Cancel", callback_data="confirm:no"),
         ],
-        [
-            InlineKeyboardButton("📝 Add Instructions", callback_data="instructions:add")
-        ],
+        [InlineKeyboardButton("📝 Add Instructions", callback_data="instructions:add")],
     ]
 
     message = f"🛒 *Final Order Confirmation*\n\n{item_details}"
@@ -889,7 +947,9 @@ async def handle_order_confirmation(update: Update, context: ContextTypes.DEFAUL
 
             # Build confirmation message using workflow
             if workflow:
-                confirmation_msg = workflow.build_confirmation_message(order_data, order_id)
+                confirmation_msg = workflow.build_confirmation_message(
+                    order_data, order_id
+                )
             else:
                 # Fallback confirmation
                 confirmation_msg = (
@@ -1155,7 +1215,9 @@ async def register_admin_command(update: Update, context: ContextTypes.DEFAULT_T
         target_user = update.message.reply_to_message.from_user
         if target_user:
             target_id = target_user.id
-            target_name = target_user.full_name or target_user.username or str(target_id)
+            target_name = (
+                target_user.full_name or target_user.username or str(target_id)
+            )
     else:
         # Admin is registering themselves
         target_id = user_id
@@ -1276,15 +1338,13 @@ async def open_sisters_command(update: Update, context: ContextTypes.DEFAULT_TYP
         "☕ *Sisters Cafe is now OPEN!*\n\n"
         f"🧔 Brothers: {'✅ Accepting orders' if state['brothers'] else '❌ Closed'}\n"
         f"🧕 Sisters: ✅ Accepting orders\n\n"
-    "_Bismillah!_",
+        "_Bismillah!_",
         parse_mode="Markdown",
     )
     logger.info(f"Sisters cafe opened by admin {user.id} ({user.full_name})")
 
 
-async def _deny_pending_orders_and_notify(
-    bot, gender_filter: str | None = None
-) -> int:
+async def _deny_pending_orders_and_notify(bot, gender_filter: str | None = None) -> int:
     """Deny pending orders and notify users.
 
     Args:
@@ -1304,7 +1364,10 @@ async def _deny_pending_orders_and_notify(
         # Filter by gender if specified
         if gender_filter:
             # Match "brothers"/"brother" or "sisters"/"sister"
-            if gender_filter == "brothers" and order_gender not in ("brothers", "brother"):
+            if gender_filter == "brothers" and order_gender not in (
+                "brothers",
+                "brother",
+            ):
                 continue
             if gender_filter == "sisters" and order_gender not in ("sisters", "sister"):
                 continue
@@ -1322,7 +1385,9 @@ async def _deny_pending_orders_and_notify(
             # Notify the user
             try:
                 if gender_filter:
-                    section = "🧔 Brothers" if gender_filter == "brothers" else "🧕 Sisters"
+                    section = (
+                        "🧔 Brothers" if gender_filter == "brothers" else "🧕 Sisters"
+                    )
                     message = (
                         f"🚫 *Order Cancelled - {section} Section Closed*\n\n"
                         f"🍽️ *Item:* {item}\n"
@@ -1345,9 +1410,13 @@ async def _deny_pending_orders_and_notify(
                     text=message,
                     parse_mode="Markdown",
                 )
-                logger.info(f"Notified user {telegram_id} about cancelled order {order_id}")
+                logger.info(
+                    f"Notified user {telegram_id} about cancelled order {order_id}"
+                )
             except Exception as e:
-                logger.error(f"Failed to notify user {telegram_id} about cancelled order: {e}")
+                logger.error(
+                    f"Failed to notify user {telegram_id} about cancelled order: {e}"
+                )
 
     return denied_count
 
@@ -1363,7 +1432,9 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     close_cafe(brothers=True, sisters=True)
 
     # Deny all pending orders and notify users
-    denied_count = await _deny_pending_orders_and_notify(context.bot, gender_filter=None)
+    denied_count = await _deny_pending_orders_and_notify(
+        context.bot, gender_filter=None
+    )
 
     denied_msg = ""
     if denied_count > 0:
@@ -1376,7 +1447,9 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"_JazakAllah Khair for your service today!_{denied_msg}",
         parse_mode="Markdown",
     )
-    logger.info(f"Cafe closed by admin {user.id} ({user.full_name}), {denied_count} orders denied")
+    logger.info(
+        f"Cafe closed by admin {user.id} ({user.full_name}), {denied_count} orders denied"
+    )
 
 
 async def close_brothers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1390,7 +1463,9 @@ async def close_brothers_command(update: Update, context: ContextTypes.DEFAULT_T
     state = close_cafe(brothers=True, sisters=False)
 
     # Deny brothers pending orders and notify users
-    denied_count = await _deny_pending_orders_and_notify(context.bot, gender_filter="brothers")
+    denied_count = await _deny_pending_orders_and_notify(
+        context.bot, gender_filter="brothers"
+    )
 
     denied_msg = ""
     if denied_count > 0:
@@ -1403,7 +1478,9 @@ async def close_brothers_command(update: Update, context: ContextTypes.DEFAULT_T
         f"_JazakAllah Khair!_{denied_msg}",
         parse_mode="Markdown",
     )
-    logger.info(f"Brothers cafe closed by admin {user.id} ({user.full_name}), {denied_count} orders denied")
+    logger.info(
+        f"Brothers cafe closed by admin {user.id} ({user.full_name}), {denied_count} orders denied"
+    )
 
 
 async def close_sisters_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1417,7 +1494,9 @@ async def close_sisters_command(update: Update, context: ContextTypes.DEFAULT_TY
     state = close_cafe(brothers=False, sisters=True)
 
     # Deny sisters pending orders and notify users
-    denied_count = await _deny_pending_orders_and_notify(context.bot, gender_filter="sisters")
+    denied_count = await _deny_pending_orders_and_notify(
+        context.bot, gender_filter="sisters"
+    )
 
     denied_msg = ""
     if denied_count > 0:
@@ -1430,7 +1509,9 @@ async def close_sisters_command(update: Update, context: ContextTypes.DEFAULT_TY
         f"_JazakAllah Khair!_{denied_msg}",
         parse_mode="Markdown",
     )
-    logger.info(f"Sisters cafe closed by admin {user.id} ({user.full_name}), {denied_count} orders denied")
+    logger.info(
+        f"Sisters cafe closed by admin {user.id} ({user.full_name}), {denied_count} orders denied"
+    )
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1602,19 +1683,46 @@ async def handle_in_progress(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ],
     ]
 
-    # Extract item info from original message if possible
-    item_line = ""
-    for line in original_message.split("\n"):
-        if "Item:" in line:
-            item_line = line
-            break
+    # Extract order details from original message
+    customer_name = ""
+    item = ""
+    price = ""
+    notes = ""
 
-    await query.edit_message_text(
+    for line in original_message.split("\n"):
+        if "Customer:" in line:
+            customer_name = (
+                line.replace("*", "").replace("👤", "").replace("Customer:", "").strip()
+            )
+        elif "Item:" in line:
+            item = line.replace("*", "").replace("🍽️", "").replace("Item:", "").strip()
+        elif "Price:" in line:
+            price = (
+                line.replace("*", "").replace("💰", "").replace("Price:", "").strip()
+            )
+        elif "Special Instructions:" in line:
+            notes = (
+                line.replace("*", "")
+                .replace("⚠️", "")
+                .replace("Special Instructions:", "")
+                .replace("_", "")
+                .strip()
+            )
+
+    # Build updated message preserving all order details
+    message = (
         f"🔄 *ORDER IN PROGRESS*\n\n"
         f"📋 *Order ID:* `{order_id}`\n"
-        f"{item_line}\n\n"
-        f"⏳ _This order is being prepared..._\n\n"
-        f"Mark as ready when complete, or deny if needed.",
+        f"👤 *Customer:* {customer_name}\n"
+        f"🍽️ *Item:* {item}\n"
+        f"💰 *Price:* {price}\n"
+    )
+    if notes:
+        message += f"\n⚠️ *Special Instructions:* _{notes}_\n"
+    message += "\n⏳ _This order is being prepared..._"
+
+    await query.edit_message_text(
+        message,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
@@ -1647,7 +1755,9 @@ async def handle_order_ready(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if gender_lower in ("sisters", "sister"):
             pickup_location = "🧕 *Pickup Location:* Kitchen area (sisters section)"
         elif gender_lower in ("brothers", "brother"):
-            pickup_location = "🧔 *Pickup Location:* Upstairs kitchen area (brothers section)"
+            pickup_location = (
+                "🧔 *Pickup Location:* Upstairs kitchen area (brothers section)"
+            )
         else:
             pickup_location = "📍 *Pickup Location:* Cafe counter"
             logger.warning(
@@ -1659,11 +1769,13 @@ async def handle_order_ready(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Build notification message using workflow or fallback
         if workflow:
-            message = workflow.build_ready_message({
-                "item": item,
-                "order_id": order_id,
-                "notes": notes,
-            })
+            message = workflow.build_ready_message(
+                {
+                    "item": item,
+                    "order_id": order_id,
+                    "notes": notes,
+                }
+            )
         else:
             message = (
                 f"🎉 *Alhamdulillah, your order is ready!*\n\n"
@@ -1709,6 +1821,35 @@ async def handle_order_complete(update: Update, context: ContextTypes.DEFAULT_TY
     order_id = parts[1]
     customer_telegram_id = int(parts[2])
 
+    # Get the original message to extract order details
+    original_message = query.message.text if query.message else ""
+
+    # Extract order details from original message
+    customer_name = ""
+    item = ""
+    price = ""
+    notes = ""
+
+    for line in original_message.split("\n"):
+        if "Customer:" in line:
+            customer_name = (
+                line.replace("*", "").replace("👤", "").replace("Customer:", "").strip()
+            )
+        elif "Item:" in line:
+            item = line.replace("*", "").replace("🍽️", "").replace("Item:", "").strip()
+        elif "Price:" in line:
+            price = (
+                line.replace("*", "").replace("💰", "").replace("Price:", "").strip()
+            )
+        elif "Special Instructions:" in line:
+            notes = (
+                line.replace("*", "")
+                .replace("⚠️", "")
+                .replace("Special Instructions:", "")
+                .replace("_", "")
+                .strip()
+            )
+
     # Mark order as completed
     result = mark_order_completed(order_id)
 
@@ -1722,8 +1863,12 @@ async def handle_order_complete(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         # Get item and determine pickup location
-        item = result.get("item", "order")
+        item_from_db = result.get("item", "order")
         gender = result.get("gender", "")
+
+        # Use item from message if extracted, otherwise from DB
+        if not item:
+            item = item_from_db
 
         logger.info(f"Order {order_id} complete - gender field value: '{gender}'")
 
@@ -1731,13 +1876,29 @@ async def handle_order_complete(update: Update, context: ContextTypes.DEFAULT_TY
         if gender_lower in ("sisters", "sister"):
             pickup_location = "🧕 *Pickup Location:* Kitchen area (sisters section)"
         elif gender_lower in ("brothers", "brother"):
-            pickup_location = "🧔 *Pickup Location:* Upstairs kitchen area (brothers section)"
+            pickup_location = (
+                "🧔 *Pickup Location:* Upstairs kitchen area (brothers section)"
+            )
         else:
             logger.warning(f"Order {order_id} has unexpected gender value: '{gender}'")
             pickup_location = "📍 *Pickup Location:* Cafe counter"
 
-        # Get customer name for staff message
-        customer_name = result.get("telegram_name", "Unknown")
+        # Get customer name from result if not extracted from message
+        if not customer_name:
+            customer_name = result.get("telegram_name", "Unknown")
+
+        # Build final message preserving all order details
+        final_message = (
+            f"✅ *ORDER COMPLETED*\n\n"
+            f"📋 *Order ID:* `{order_id}`\n"
+            f"👤 *Customer:* {customer_name}\n"
+            f"🍽️ *Item:* {item}\n"
+        )
+        if price:
+            final_message += f"💰 *Price:* {price}\n"
+        if notes:
+            final_message += f"\n⚠️ *Special Instructions:* _{notes}_\n"
+        final_message += "\n✅ _Customer has been notified._\n\n_JazakAllah Khair!_"
 
         # Notify customer
         try:
@@ -1754,18 +1915,26 @@ async def handle_order_complete(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode="Markdown",
             )
             await query.edit_message_text(
-                f"✅ *Order Completed!*\n\n"
-                f"👤 *Customer:* {customer_name}\n"
-                f"📋 *Order ID:* `{order_id}`\n\n"
-                f"Customer has been notified.\n\n"
-                f"_JazakAllah Khair!_",
+                final_message,
                 parse_mode="Markdown",
             )
         except (BadRequest, Forbidden) as e:
             logger.warning(f"Could not notify user {customer_telegram_id}: {e}")
+            final_message_error = (
+                f"✅ *ORDER COMPLETED*\n\n"
+                f"📋 *Order ID:* `{order_id}`\n"
+                f"👤 *Customer:* {customer_name}\n"
+                f"🍽️ *Item:* {item}\n"
+            )
+            if price:
+                final_message_error += f"💰 *Price:* {price}\n"
+            if notes:
+                final_message_error += f"\n⚠️ *Special Instructions:* _{notes}_\n"
+            final_message_error += (
+                "\n⚠️ _Could not notify customer (they may have blocked the bot)._"
+            )
             await query.edit_message_text(
-                f"✅ Order completed for *{customer_name}* (`{order_id}`)\n"
-                f"⚠️ Could not notify customer (they may have blocked the bot).",
+                final_message_error,
                 parse_mode="Markdown",
             )
     else:
@@ -1784,6 +1953,35 @@ async def handle_order_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = parts[1]
     customer_telegram_id = int(parts[2])
 
+    # Get the original message to extract order details
+    original_message = query.message.text if query.message else ""
+
+    # Extract order details from original message
+    customer_name = ""
+    item = ""
+    price = ""
+    notes = ""
+
+    for line in original_message.split("\n"):
+        if "Customer:" in line:
+            customer_name = (
+                line.replace("*", "").replace("👤", "").replace("Customer:", "").strip()
+            )
+        elif "Item:" in line:
+            item = line.replace("*", "").replace("🍽️", "").replace("Item:", "").strip()
+        elif "Price:" in line:
+            price = (
+                line.replace("*", "").replace("💰", "").replace("Price:", "").strip()
+            )
+        elif "Special Instructions:" in line:
+            notes = (
+                line.replace("*", "")
+                .replace("⚠️", "")
+                .replace("Special Instructions:", "")
+                .replace("_", "")
+                .strip()
+            )
+
     # Mark order as denied
     result = mark_order_denied(order_id)
 
@@ -1796,8 +1994,25 @@ async def handle_order_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Get customer name for staff message
-        customer_name = result.get("telegram_name", "Unknown")
+        # Get customer name from result if not extracted from message
+        if not customer_name:
+            customer_name = result.get("telegram_name", "Unknown")
+
+        # Build final message preserving all order details
+        final_message = (
+            f"❌ *ORDER DENIED*\n\n"
+            f"📋 *Order ID:* `{order_id}`\n"
+            f"👤 *Customer:* {customer_name}\n"
+        )
+        if item:
+            final_message += f"🍽️ *Item:* {item}\n"
+        if price:
+            final_message += f"💰 *Price:* {price}\n"
+        if notes:
+            final_message += f"\n⚠️ *Special Instructions:* _{notes}_\n"
+        final_message += (
+            "\n❌ _Customer has been notified._\n\n_May Allah make it easy._"
+        )
 
         # Notify customer
         try:
@@ -1816,18 +2031,27 @@ async def handle_order_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
             await query.edit_message_text(
-                f"❌ *Order Denied*\n\n"
-                f"👤 *Customer:* {customer_name}\n"
-                f"📋 *Order ID:* `{order_id}`\n\n"
-                f"Customer has been notified.\n\n"
-                f"_May Allah make it easy._",
+                final_message,
                 parse_mode="Markdown",
             )
         except (BadRequest, Forbidden) as e:
             logger.warning(f"Could not notify user {customer_telegram_id}: {e}")
+            final_message_error = (
+                f"❌ *ORDER DENIED*\n\n"
+                f"📋 *Order ID:* `{order_id}`\n"
+                f"👤 *Customer:* {customer_name}\n"
+            )
+            if item:
+                final_message_error += f"🍽️ *Item:* {item}\n"
+            if price:
+                final_message_error += f"💰 *Price:* {price}\n"
+            if notes:
+                final_message_error += f"\n⚠️ *Special Instructions:* _{notes}_\n"
+            final_message_error += (
+                "\n⚠️ _Could not notify customer (they may have blocked the bot)._"
+            )
             await query.edit_message_text(
-                f"❌ Order denied for *{customer_name}* (`{order_id}`)\n"
-                f"⚠️ Could not notify customer (they may have blocked the bot).",
+                final_message_error,
                 parse_mode="Markdown",
             )
     else:
@@ -1942,11 +2166,11 @@ def main():
 
     # Register callback handlers
     app.add_handler(
-        CallbackQueryHandler(handle_gender_selection, pattern=r"^gender:(brothers|sisters)$")
+        CallbackQueryHandler(
+            handle_gender_selection, pattern=r"^gender:(brothers|sisters)$"
+        )
     )
-    app.add_handler(
-        CallbackQueryHandler(handle_gender_back, pattern=r"^gender:back$")
-    )
+    app.add_handler(CallbackQueryHandler(handle_gender_back, pattern=r"^gender:back$"))
     app.add_handler(CallbackQueryHandler(handle_header_click, pattern=r"^header:"))
     app.add_handler(CallbackQueryHandler(handle_menu_selection, pattern=r"^menu:"))
     # Drink customization handlers
