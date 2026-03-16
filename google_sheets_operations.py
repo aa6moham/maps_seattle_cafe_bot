@@ -12,7 +12,6 @@ from threading import Lock
 
 import gspread
 from google.oauth2.service_account import Credentials
-
 from logger import setup_logger
 from orders_cache import OrdersCache
 from private.constants import SPREADSHEET_ID
@@ -111,7 +110,9 @@ def get_gspread_client() -> gspread.Client:
 
     with _gspread_client_lock:
         if _gspread_client is None:
-            creds = Credentials.from_service_account_file("creds/creds.json", scopes=SCOPES)
+            creds = Credentials.from_service_account_file(
+                "creds/creds.json", scopes=SCOPES
+            )
             _gspread_client = gspread.authorize(creds)
             logger.info("Created new gspread client")
 
@@ -149,7 +150,9 @@ def is_admin(telegram_id: int) -> bool:
         return False
 
     all_admins = admins_sheet.get_all_records()
-    logger.info(f"Checking admin status for {telegram_id}, found {len(all_admins)} admins in sheet")
+    logger.info(
+        f"Checking admin status for {telegram_id}, found {len(all_admins)} admins in sheet"
+    )
 
     for admin in all_admins:
         try:
@@ -166,7 +169,9 @@ def is_admin(telegram_id: int) -> bool:
                 set_cached(cache_key, True, ttl=300)
                 return True
         except (ValueError, TypeError) as e:
-            logger.warning(f"Invalid telegram_id in admins sheet: {admin.get('telegram_id')} - {e}")
+            logger.warning(
+                f"Invalid telegram_id in admins sheet: {admin.get('telegram_id')} - {e}"
+            )
             continue
 
     logger.info(f"User {telegram_id} is NOT an admin")
@@ -204,6 +209,32 @@ def get_admin_count() -> int:
 
 
 @retry_on_quota_error()
+def get_all_admins() -> list[dict]:
+    """Get all admins from the admins sheet.
+
+    Returns:
+        List of admin dictionaries with telegram_id, telegram_name, registered_at.
+    """
+    cache_key = "admins:all"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+    try:
+        admins_sheet = spreadsheet.worksheet("admins")
+    except gspread.exceptions.WorksheetNotFound:
+        logger.warning("'admins' sheet not found")
+        return []
+
+    all_admins = admins_sheet.get_all_records()
+    set_cached(cache_key, all_admins, ttl=300)
+    return all_admins
+
+
+@retry_on_quota_error()
 def register_admin(telegram_id: int, telegram_name: str) -> bool:
     """Register a user as an admin.
 
@@ -221,7 +252,9 @@ def register_admin(telegram_id: int, telegram_name: str) -> bool:
 
     # Ensure telegram_name is different from telegram_id (avoid storing ID as name)
     if telegram_name == str(telegram_id):
-        logger.warning(f"telegram_name is same as telegram_id ({telegram_id}), using 'Unknown'")
+        logger.warning(
+            f"telegram_name is same as telegram_id ({telegram_id}), using 'Unknown'"
+        )
         telegram_name = "Unknown"
 
     client = get_gspread_client()
@@ -292,14 +325,18 @@ def register_cafe_chat(
         chats_sheet = spreadsheet.worksheet("cafe_registered")
     except gspread.exceptions.WorksheetNotFound:
         # Create the sheet with headers
-        chats_sheet = spreadsheet.add_worksheet(title="cafe_registered", rows=100, cols=5)
-        chats_sheet.append_row([
-            "chat_id",
-            "chat_title",
-            "brothers_topic_id",
-            "sisters_topic_id",
-            "registered_at",
-        ])
+        chats_sheet = spreadsheet.add_worksheet(
+            title="cafe_registered", rows=100, cols=5
+        )
+        chats_sheet.append_row(
+            [
+                "chat_id",
+                "chat_title",
+                "brothers_topic_id",
+                "sisters_topic_id",
+                "registered_at",
+            ]
+        )
         logger.info("Created 'cafe_registered' sheet")
 
     # Check if already registered
@@ -310,13 +347,15 @@ def register_cafe_chat(
 
     # Add new registration
     registered_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    chats_sheet.append_row([
-        chat_id,
-        chat_title,
-        brothers_topic_id,
-        sisters_topic_id,
-        registered_at,
-    ])
+    chats_sheet.append_row(
+        [
+            chat_id,
+            chat_title,
+            brothers_topic_id,
+            sisters_topic_id,
+            registered_at,
+        ]
+    )
 
     # Invalidate cache
     invalidate_cache(f"cafe_chat:{chat_id}")
@@ -492,7 +531,9 @@ def open_cafe(brothers: bool = True, sisters: bool = True) -> dict[str, bool]:
             _cafe_state["brothers"] = True
         if sisters:
             _cafe_state["sisters"] = True
-        logger.info(f"Cafe opened: brothers={_cafe_state['brothers']}, sisters={_cafe_state['sisters']}")
+        logger.info(
+            f"Cafe opened: brothers={_cafe_state['brothers']}, sisters={_cafe_state['sisters']}"
+        )
         return _cafe_state.copy()
 
 
@@ -511,7 +552,9 @@ def close_cafe(brothers: bool = True, sisters: bool = True) -> dict[str, bool]:
             _cafe_state["brothers"] = False
         if sisters:
             _cafe_state["sisters"] = False
-        logger.info(f"Cafe closed: brothers={_cafe_state['brothers']}, sisters={_cafe_state['sisters']}")
+        logger.info(
+            f"Cafe closed: brothers={_cafe_state['brothers']}, sisters={_cafe_state['sisters']}"
+        )
         return _cafe_state.copy()
 
 
@@ -585,17 +628,19 @@ def get_menu_items() -> list[dict]:
         else:
             shots_options = [s.strip() for s in shots_raw.split(";") if s.strip()]
 
-        menu_items.append({
-            "item_id": str(idx + 1),  # Simple ID based on row
-            "item": str(item.get("item", "")).strip(),
-            "price": price,
-            "gender": str(item.get("gender", "")).strip(),
-            "description": str(item.get("description", "")).strip(),
-            "temperature_options": temperature_options,
-            "syrup_options": syrup_options,
-            "caffeine_options": caffeine_options,
-            "shots_options": shots_options,
-        })
+        menu_items.append(
+            {
+                "item_id": str(idx + 1),  # Simple ID based on row
+                "item": str(item.get("item", "")).strip(),
+                "price": price,
+                "gender": str(item.get("gender", "")).strip(),
+                "description": str(item.get("description", "")).strip(),
+                "temperature_options": temperature_options,
+                "syrup_options": syrup_options,
+                "caffeine_options": caffeine_options,
+                "shots_options": shots_options,
+            }
+        )
 
     # Filter out empty items
     menu_items = [i for i in menu_items if i["item"]]
@@ -667,6 +712,62 @@ def get_orders_for_user(telegram_id: int) -> list[dict]:
         List of order dictionaries for the user, sorted by most recent first.
     """
     return orders_cache.get_orders_for_user(telegram_id)
+
+
+def get_all_orders() -> list[dict]:
+    """Get all orders from the cache.
+
+    Returns:
+        List of all order dictionaries, sorted by most recent first.
+    """
+    return orders_cache.get_all_orders()
+
+
+@retry_on_quota_error()
+def get_all_orders_from_sheet() -> list[dict]:
+    """Get all orders directly from the Google Sheet (not cache).
+
+    Use this for reporting/summary functions that need all historical data.
+
+    Returns:
+        List of all order dictionaries from the sheet, sorted by most recent first.
+    """
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+    try:
+        orders_sheet = spreadsheet.worksheet("orders")
+    except gspread.exceptions.WorksheetNotFound:
+        logger.warning("'orders' sheet not found")
+        return []
+
+    all_orders = orders_sheet.get_all_records()
+
+    # Process and normalize the data
+    result = []
+    for order in all_orders:
+        order_id = str(order.get("order_id", ""))
+        if not order_id:
+            continue
+
+        result.append({
+            "order_id": order_id,
+            "telegram_id": int(order.get("telegram_id", 0)),
+            "telegram_name": str(order.get("telegram_name", "")),
+            "item": str(order.get("item", "")),
+            "price": float(order.get("price", 0)),
+            "gender": str(order.get("gender", "")),
+            "notes": str(order.get("notes", "")),
+            "status": str(order.get("status", "")).lower(),
+            "created_at": str(order.get("created_at", "")),
+            "completed_at": str(order.get("completed_at", "")),
+        })
+
+    # Sort by created_at descending (most recent first)
+    result.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+    logger.info(f"Loaded {len(result)} orders directly from sheet")
+    return result
 
 
 @retry_on_quota_error()
@@ -800,9 +901,7 @@ async def unified_sync_processor():
         stats = await asyncio.get_event_loop().run_in_executor(
             None, _perform_unified_sync
         )
-        logger.info(
-            f"Initial sync complete: {stats['cache_entries']} orders loaded"
-        )
+        logger.info(f"Initial sync complete: {stats['cache_entries']} orders loaded")
     except Exception as e:
         logger.error(f"Failed to perform initial sync: {e}")
         orders_cache._initialized = True  # Allow bot to start anyway
@@ -817,7 +916,10 @@ async def unified_sync_processor():
                     None, _perform_unified_sync
                 )
                 # Only log if there were writes
-                if stats["new_orders_written"] > 0 or stats["status_updates_written"] > 0:
+                if (
+                    stats["new_orders_written"] > 0
+                    or stats["status_updates_written"] > 0
+                ):
                     logger.info(
                         f"Sync: wrote {stats['new_orders_written']} orders, "
                         f"{stats['status_updates_written']} updates, "

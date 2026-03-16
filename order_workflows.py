@@ -19,15 +19,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
+from google_sheets_operations import create_order, get_cafe_state, get_menu_items
+from logger import setup_logger
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
-
-from google_sheets_operations import (
-    create_order,
-    get_cafe_state,
-    get_menu_items,
-)
-from logger import setup_logger
 
 logger = setup_logger(__name__)
 
@@ -40,6 +35,7 @@ logger = setup_logger(__name__)
 @dataclass
 class OrderData:
     """Data class representing an order in progress."""
+
     item_id: str
     item: str
     price: float
@@ -133,6 +129,7 @@ class OrderData:
 @dataclass
 class SectionConfig:
     """Configuration for a section (brothers or sisters)."""
+
     name: str  # "brothers" or "sisters"
     display_name: str  # "🧔 Brothers" or "🧕 Sisters"
     emoji: str  # "🧔" or "🧕"
@@ -276,7 +273,9 @@ class BaseOrderWorkflow(ABC):
         for item in menu_items:
             button_text = f"{item['item']} - ${item['price']:.2f}"
             callback_data = f"menu:{item['item_id']}:{self.section_name}"
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+            keyboard.append(
+                [InlineKeyboardButton(button_text, callback_data=callback_data)]
+            )
 
         # Add back button
         keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="gender:back")])
@@ -302,7 +301,9 @@ class BaseOrderWorkflow(ABC):
 
         Override in subclass for custom confirmation.
         """
-        pickup_location = f"{self.config.emoji} *Pickup Location:* {self.get_pickup_location()}"
+        pickup_location = (
+            f"{self.config.emoji} *Pickup Location:* {self.get_pickup_location()}"
+        )
 
         msg = (
             f"✅ *Order Placed!*\n\n"
@@ -373,7 +374,9 @@ class BrothersOrderWorkflow(BaseOrderWorkflow):
 
     def build_confirmation_message(self, order_data: OrderData, order_id: str) -> str:
         """Build confirmation message with brothers-specific payment instructions."""
-        pickup_location = f"{self.config.emoji} *Pickup Location:* {self.get_pickup_location()}"
+        pickup_location = (
+            f"{self.config.emoji} *Pickup Location:* {self.get_pickup_location()}"
+        )
 
         msg = (
             f"✅ *Order Placed!*\n\n"
@@ -430,7 +433,9 @@ class SistersOrderWorkflow(BaseOrderWorkflow):
 
     def build_confirmation_message(self, order_data: OrderData, order_id: str) -> str:
         """Build confirmation message with sisters-specific payment instructions."""
-        pickup_location = f"{self.config.emoji} *Pickup Location:* {self.get_pickup_location()}"
+        pickup_location = (
+            f"{self.config.emoji} *Pickup Location:* {self.get_pickup_location()}"
+        )
 
         msg = (
             f"✅ *Order Placed!*\n\n"

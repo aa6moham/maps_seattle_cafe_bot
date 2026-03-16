@@ -11,6 +11,9 @@ from google_sheets_operations import (
     create_order,
     deregister_cafe_chat,
     get_admin_count,
+    get_all_admins,
+    get_all_orders,
+    get_all_orders_from_sheet,
     get_all_registered_cafe_chats,
     get_cafe_state,
     get_menu_items,
@@ -165,19 +168,24 @@ async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"User {user.id} ({user.full_name}) requested menu")
 
-    # Check if user already has a pending order (rate limiting)
+    # Check if user already has 3 or more pending orders (limit concurrent orders)
+    MAX_CONCURRENT_ORDERS = 3
     user_orders = get_orders_for_user(user.id)
     pending_orders = [
         o for o in user_orders if o.get("status", "").lower() == "pending"
     ]
 
-    if pending_orders:
-        pending_order = pending_orders[0]
+    if len(pending_orders) >= MAX_CONCURRENT_ORDERS:
+        # Build list of pending orders for display
+        orders_list = "\n".join(
+            f"  • {o.get('item', 'Unknown')} (`{o.get('order_id', 'N/A')}`)"
+            for o in pending_orders
+        )
         await update.message.reply_text(
-            "⏳ *You Already Have a Pending Order*\n\n"
-            f"🍽️ *Item:* {pending_order.get('item', 'Unknown')}\n"
-            f"📋 *Order ID:* `{pending_order.get('order_id', 'N/A')}`\n\n"
-            "Please wait for your current order to be completed before placing a new one.\n\n"
+            f"⏳ *You Have {len(pending_orders)} Pending Orders*\n\n"
+            f"{orders_list}\n\n"
+            f"You can have up to {MAX_CONCURRENT_ORDERS} pending orders at a time.\n"
+            "Please wait for one to be completed before placing a new one.\n\n"
             "_Use /mystatus to check your order status._",
             parse_mode="Markdown",
         )
@@ -426,7 +434,9 @@ async def show_shots_selection(query, context):
             row = []
     if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")])
+    buttons.append(
+        [InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")]
+    )
 
     await query.edit_message_text(
         f"☕ *Customize Your Order*\n\n"
@@ -503,13 +513,17 @@ async def show_decaf_selection(query, context):
             label = f"☕ {option}"
         else:
             label = option
-        row.append(InlineKeyboardButton(label, callback_data=f"customize:decaf:{option}"))
+        row.append(
+            InlineKeyboardButton(label, callback_data=f"customize:decaf:{option}")
+        )
         if len(row) == 2:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")])
+    buttons.append(
+        [InlineKeyboardButton("❌ Cancel Order", callback_data="confirm:no")]
+    )
 
     # Show current selections
     selections = []
@@ -1320,6 +1334,266 @@ async def register_admin_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(
             f"ℹ️ {target_name} is already registered as an admin."
         )
+
+
+# ============================================================================
+# LIST ADMINS COMMAND
+# ============================================================================
+
+
+async def list_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /list_admins command - List all admins with their tags (admin-only)
+
+    Displays all registered admins with their Telegram handles so they can be tagged.
+    """
+    user = update.effective_user
+    user_id = user.id
+
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "🚫 *Admin Access Required*\n\n"
+            "Only admins can view the admin list.",
+            parse_mode="Markdown",
+        )
+        return
+
+    admins = get_all_admins()
+
+    if not admins:
+        await update.message.reply_text(
+            "❌ *No Admins Found*\n\n"
+            "There are no registered admins in the system.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Build the admin list message
+    message = "👥 *Registered Admins*\n"
+    message += "\n"
+
+    for i, admin in enumerate(admins, 1):
+        telegram_id = admin.get("telegram_id", "")
+        telegram_name = admin.get("telegram_name", "Unknown")
+        registered_at = admin.get("registered_at", "")
+
+        # Format the admin entry
+        # If telegram_name starts with @, it's a username that can be tagged
+        if str(telegram_name).startswith("@"):
+            display_name = telegram_name  # Already taggable
+        else:
+            # Try to create a mention using the numeric ID
+            try:
+                numeric_id = int(telegram_id)
+                # Use Markdown mention format: [Name](tg://user?id=123)
+                display_name = f"[{telegram_name}](tg://user?id={numeric_id})"
+            except (ValueError, TypeError):
+                display_name = telegram_name
+
+        message += f"{i}. {display_name}"
+        if registered_at:
+            message += f" _(added: {registered_at})_"
+        message += "\n"
+
+    message += "\n"
+    message += f"*Total:* {len(admins)} admin(s)"
+
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show order summary with profits by gender per day (admin only).
+
+    Usage: /summary [date]
+    - No date: Show all summaries
+    - With date: Filter to specific date (formats: YYYY-MM-DD, MM/DD, M/D)
+
+    Example: /summary 03/14
+    """
+    caller_telegram_id = update.effective_user.id
+
+    if not is_admin(caller_telegram_id):
+        await _send_admin_denied_and_cleanup(update)
+        return
+
+    # Parse optional date argument
+    date_filter = None
+    if context.args:
+        date_str = " ".join(context.args)
+        date_filter = _parse_summary_date(date_str)
+        if date_filter is None:
+            await update.message.reply_text(
+                f"❌ Could not parse date: `{date_str}`\n\n"
+                "Supported formats:\n"
+                "• `2026-03-14` (YYYY-MM-DD)\n"
+                "• `03/14` or `3/14` (MM/DD)\n"
+                "• `03-14` (MM-DD)",
+                parse_mode="Markdown",
+            )
+            return
+
+    # Get all orders directly from Google Sheet
+    all_orders = get_all_orders_from_sheet()
+
+    if not all_orders:
+        await update.message.reply_text("📊 No orders found.")
+        return
+
+    # Debug: Show all unique dates and statuses found
+    unique_dates = set()
+    status_counts = {}
+    for order in all_orders:
+        created_at = order.get("created_at", "")
+        if " " in created_at:
+            order_date = created_at.split(" ")[0]
+        else:
+            order_date = created_at[:10] if len(created_at) >= 10 else created_at
+        unique_dates.add(order_date)
+
+        status = order.get("status", "unknown").lower()
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    logger.info(f"Summary command: Found {len(all_orders)} total orders")
+    logger.info(f"Summary command: Unique dates: {sorted(unique_dates)}")
+    logger.info(f"Summary command: Status counts: {status_counts}")
+
+    # Group orders by date and gender
+    # Structure: {date_str: {gender: {"count": int, "total": float}}}
+    from collections import defaultdict
+
+    daily_summary = defaultdict(lambda: defaultdict(lambda: {"count": 0, "total": 0.0}))
+    grand_total = {"count": 0, "total": 0.0}
+    gender_totals = defaultdict(lambda: {"count": 0, "total": 0.0})
+
+    for order in all_orders:
+        created_at = order.get("created_at", "")
+        status = order.get("status", "").lower().strip()
+
+        # Only count completed/ready orders for profit
+        # ready = paid/notified, completed = fully done
+        if status not in ("completed", "complete", "done", "fulfilled", "ready"):
+            continue
+
+        # Extract date from created_at (format: YYYY-MM-DD HH:MM:SS)
+        if " " in created_at:
+            order_date = created_at.split(" ")[0]
+        else:
+            order_date = created_at[:10] if len(created_at) >= 10 else created_at
+
+        # Apply date filter if provided
+        if date_filter:
+            # Convert order_date to comparable format
+            try:
+                from datetime import datetime as dt
+
+                order_dt = dt.strptime(order_date, "%Y-%m-%d")
+                if order_dt.date() != date_filter:
+                    continue
+            except ValueError:
+                continue
+
+        gender = order.get("gender", "unknown").lower()
+        if not gender:
+            gender = "unknown"
+
+        price = float(order.get("price", 0))
+
+        daily_summary[order_date][gender]["count"] += 1
+        daily_summary[order_date][gender]["total"] += price
+
+        gender_totals[gender]["count"] += 1
+        gender_totals[gender]["total"] += price
+
+        grand_total["count"] += 1
+        grand_total["total"] += price
+
+    if not daily_summary:
+        filter_msg = f" for {date_filter}" if date_filter else ""
+        await update.message.reply_text(f"🕌 No completed orders found{filter_msg}.")
+        return
+
+    # Build message with Islamic terminology
+    message = "🕌 *Cafe Summary - Alhamdulillah*\n\n"
+
+    if date_filter:
+        message += f"🗓 *Date:* {date_filter}\n\n"
+
+    # Sort dates in descending order (most recent first)
+    sorted_dates = sorted(daily_summary.keys(), reverse=True)
+
+    for date_str in sorted_dates:
+        genders = daily_summary[date_str]
+        day_total = sum(g["total"] for g in genders.values())
+        day_count = sum(g["count"] for g in genders.values())
+
+        message += f"📅 *{date_str}* — {day_count} orders, ${day_total:.2f}\n"
+
+        for gender, stats in sorted(genders.items()):
+            if gender == "brothers":
+                emoji = "🧔"
+                gender_label = "Brothers"
+            elif gender == "sisters":
+                emoji = "🧕"
+                gender_label = "Sisters"
+            else:
+                emoji = "☪️"
+                gender_label = gender.capitalize()
+
+            message += f"   {emoji} {gender_label}: {stats['count']} orders, ${stats['total']:.2f}\n"
+
+        message += "\n"
+
+    # Overall totals
+    message += "*Overall Totals:*\n"
+    for gender, stats in sorted(gender_totals.items()):
+        if gender == "brothers":
+            emoji = "🧔"
+            gender_label = "Brothers"
+        elif gender == "sisters":
+            emoji = "🧕"
+            gender_label = "Sisters"
+        else:
+            emoji = "☪️"
+            gender_label = gender.capitalize()
+        message += f"   {emoji} {gender_label}: {stats['count']} orders, ${stats['total']:.2f}\n"
+
+    message += f"\n☪️ *Grand Total:* {grand_total['count']} orders, ${grand_total['total']:.2f}"
+    message += "\n\n_Barakallahu feekum!_"
+
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+
+def _parse_summary_date(date_str: str):
+    """Parse a date string for the summary filter.
+
+    Args:
+        date_str: Date string in various formats.
+
+    Returns:
+        datetime.date object if parsed, None otherwise.
+    """
+    from datetime import datetime as dt
+
+    date_str = date_str.strip()
+
+    # Try various formats
+    formats = [
+        "%Y-%m-%d",  # 2026-03-14
+        "%m/%d/%Y",  # 03/14/2026
+        "%m/%d",  # 03/14
+        "%m-%d",  # 03-14
+    ]
+
+    for fmt in formats:
+        try:
+            parsed = dt.strptime(date_str, fmt)
+            # If year is 1900 (default), use current year
+            if parsed.year == 1900:
+                parsed = parsed.replace(year=dt.now().year)
+            return parsed.date()
+        except ValueError:
+            continue
+
+    return None
 
 
 # ============================================================================
@@ -2218,6 +2492,8 @@ def main():
     app.add_handler(CommandHandler("register", register_command))
     app.add_handler(CommandHandler("deregister", deregister_command))
     app.add_handler(CommandHandler("register_admin", register_admin_command))
+    app.add_handler(CommandHandler("list_admins", list_admins_command))
+    app.add_handler(CommandHandler("summary", summary_command))
     app.add_handler(CommandHandler("status", status_command))
 
     # Cafe open/close commands (admin only)

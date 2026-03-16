@@ -38,10 +38,10 @@ logger = setup_logger("maps_cafe_bot.orders_cache")
 
 def _escape_sheet_value(value: str) -> str:
     """Escape a value to prevent Google Sheets from interpreting it as a formula.
-    
+
     Args:
         value: The string value to escape.
-        
+
     Returns:
         The escaped value (prefixed with ' if it starts with formula characters).
     """
@@ -267,6 +267,18 @@ class OrdersCache:
             # Sort by created_at descending (most recent first)
             user_orders.sort(key=lambda x: x.get("created_at", ""), reverse=True)
             return user_orders
+
+    def get_all_orders(self) -> list[dict]:
+        """Get all orders from the cache (thread-safe).
+
+        Returns:
+            List of all order dicts, sorted by created_at descending.
+        """
+        with self._lock:
+            all_orders = [order.copy() for order in self._orders.values()]
+            # Sort by created_at descending (most recent first)
+            all_orders.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            return all_orders
 
     def get_pending_new_orders(self) -> list[dict]:
         """Get all new orders that need to be written to Sheets.
